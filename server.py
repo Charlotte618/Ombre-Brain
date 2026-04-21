@@ -790,10 +790,15 @@ async def hold(
         }
 
     domain = analysis["domain"]
-    valence = analysis["valence"]
-    arousal = analysis["arousal"]
+    auto_valence = analysis["valence"]
+    auto_arousal = analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = analysis.get("suggested_name", "")
+
+    # --- User-supplied valence/arousal takes priority over analyze() result ---
+    # --- 用户显式传入的 valence/arousal 优先，analyze() 结果作为 fallback ---
+    final_valence = valence if 0 <= valence <= 1 else auto_valence
+    final_arousal = arousal if 0 <= arousal <= 1 else auto_arousal
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
 
@@ -805,8 +810,8 @@ async def hold(
             tags=all_tags,
             importance=10,
             domain=domain,
-            valence=valence,
-            arousal=arousal,
+            valence=final_valence,
+            arousal=final_arousal,
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
@@ -823,8 +828,8 @@ async def hold(
         tags=all_tags,
         importance=importance,
         domain=domain,
-        valence=valence,
-        arousal=arousal,
+        valence=final_valence,
+        arousal=final_arousal,
         name=suggested_name,
     )
 
