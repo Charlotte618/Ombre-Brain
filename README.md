@@ -154,12 +154,12 @@ docker compose -f docker-compose.user.yml up -d
 ### 第四步：验证
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:18001/health
 ```
 
 返回 `{"status":"ok",...}` 即成功。
 
-浏览器打开 Dashboard：`http://localhost:8000`
+浏览器打开 Dashboard：`http://localhost:18001`
 
 > 第一次访问会弹出密码设置向导，设好密码后所有 `/api/*` 端点都需要这个密码登录。
 
@@ -193,7 +193,7 @@ curl http://localhost:8000/health
   "mcpServers": {
     "ombre-brain": {
       "type": "streamable-http",
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:18001/mcp"
     }
   }
 }
@@ -291,7 +291,7 @@ http(s)://<你的地址>:18001/mcp
 ```
 
 > **`<你的地址>` 填什么？**
-> - **本机访问**：`http://localhost:18001/mcp`（`deploy/docker-compose.yml` 默认映射到 18001 端口；Docker Hub 镜像默认 8000）
+> - **本机访问**：`http://localhost:18001/mcp`（两种 compose 现已统一默认对外端口 18001 → 容器内 8000；想换端口在 `deploy/.env` 设 `OMBRE_HOST_PORT`）
 > - **直连 VPS 公网 IP**：`http://你的服务器IP:18001/mcp`
 > - **用了 Cloudflare Tunnel / 自有域名**：把 `<你的地址>:18001` 整段换成你的网址，且通常不带端口、走 https，例如 `https://ombre.example.com/mcp`
 >

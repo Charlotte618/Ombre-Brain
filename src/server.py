@@ -121,12 +121,18 @@ except Exception as _e:  # pragma: no cover - defensive / 防御性兑底
     logger.warning(f"[migration] check skipped: {_e}")
 
 # --- Runtime env vars (port + webhook) / 运行时环境变量 ---
-# OMBRE_PORT: HTTP/SSE 监听端口，默认 8000
+# OMBRE_PORT: HTTP/SSE 监听端口，默认 18001
+# Docker 部署：compose 显式设 OMBRE_PORT=8000 保持容器内 8000（不动 Cloudflare ingress），
+# 由 host 端口映射 18001:8000 对外暴露 18001。裸机：直接监听 18001。
+# 端口优先级：env OMBRE_PORT（Docker 由 Dockerfile 固定 8000）> config.yaml host_port
+# （裸机前端可改、保存即写 config）> 默认 18001。Docker 下前端改 host_port 不影响容器内
+# 监听（仍 8000），由 host 映射 OMBRE_HOST_PORT 决定对外端口（部署脚本读 config 注入）。
 try:
-    OMBRE_PORT = int(os.environ.get("OMBRE_PORT", "8000") or "8000")
-except ValueError:
-    logger.warning("OMBRE_PORT 不是合法整数，回退到 8000")
-    OMBRE_PORT = 8000
+    _port_raw = os.environ.get("OMBRE_PORT") or str(config.get("host_port") or "") or "18001"
+    OMBRE_PORT = int(_port_raw)
+except (ValueError, TypeError):
+    logger.warning("端口配置不是合法整数，回退到 18001")
+    OMBRE_PORT = 18001
 
 # OMBRE_HOOK_URL: 在 breath/dream 被调用后推送事件到该 URL（POST JSON）。
 # OMBRE_HOOK_SKIP: 设为 true/1/yes 跳过推送。详见 ENV_VARS.md。

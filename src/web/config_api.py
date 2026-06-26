@@ -133,6 +133,9 @@ def register(mcp) -> None:
             # MCP OAuth 鉴权开关。默认 true（强制 OAuth）。前端「⑥ MCP 连接」面板用它
             # 渲染一键开关；关掉后 /mcp 免认证直连（供自有前端 / GPT / GLM 等）。
             "mcp_require_auth": bool(sh.config.get("mcp_require_auth", True)),
+            # 部署信息：数据目录 + 端口 + 是否容器内。前端「系统」区展示，端口可改。
+            "host_port": sh.config.get("host_port"),
+            "in_docker": sh.in_docker(),
         })
 
 
@@ -235,6 +238,17 @@ def register(mcp) -> None:
             sh.config["mcp_require_auth"] = bool(body["mcp_require_auth"])
             updated.append("mcp_require_auth")
 
+        # --- 对外端口（host_port）---
+        # 裸机：写 config 后进程自重启即监听新端口（前端「保存并重启」）。
+        # Docker：容器内端口由 Dockerfile 固定，host_port 仅供部署脚本读取注入
+        # OMBRE_HOST_PORT，须重建容器才生效（前端会提示）。
+        if "host_port" in body:
+            try:
+                sh.config["host_port"] = int(body["host_port"])
+                updated.append("host_port")
+            except (TypeError, ValueError):
+                pass
+
         # --- Surfacing defaults (breath/feel token & result caps) ---
         if "surfacing" in body and isinstance(body["surfacing"], dict):
             sf = sh.config.setdefault("surfacing", {})
@@ -288,6 +302,12 @@ def register(mcp) -> None:
 
                 if "mcp_require_auth" in body:
                     save_config["mcp_require_auth"] = bool(body["mcp_require_auth"])
+
+                if "host_port" in body:
+                    try:
+                        save_config["host_port"] = int(body["host_port"])
+                    except (TypeError, ValueError):
+                        pass
 
                 if "surfacing" in body and isinstance(body["surfacing"], dict):
                     sc_sf = save_config.setdefault("surfacing", {})

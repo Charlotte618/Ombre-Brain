@@ -2696,6 +2696,18 @@
         </div>
       </div>
 
+      <!-- 服务端口 -->
+      <div style="margin:18px 0;padding:14px;background:var(--surface-solid);border-radius:11px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">服务端口</div>
+        <div class="config-row" style="align-items:center;">
+          <label>对外端口</label>
+          <input type="number" id="cfg-host-port" min="1" max="65535" placeholder="18001" style="width:140px;" />
+          <button type="button" onclick="saveHostPort()" title="保存端口" style="margin-left:8px;padding:0 12px;height:32px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="save"></i> 保存</button>
+          <span id="host-port-msg" style="margin-left:8px;font-size:11px;"></span>
+        </div>
+        <div id="host-port-hint" style="margin-top:6px;font-size:11px;color:var(--text-light);line-height:1.7;"></div>
+      </div>
+
       <!-- 操作按钮 -->
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
         <button class="btn-primary" onclick="copyAllMcpUrls()" title="复制 /mcp 链接"><i data-lucide="copy"></i> 复制链接</button>
@@ -5724,12 +5736,22 @@ async function loadConfig() {
     document.getElementById('cfg-merge').value = cfg.merge_threshold || 75;
     var mcpAuthEl = document.getElementById('cfg-mcp-auth');
     if (mcpAuthEl) mcpAuthEl.value = cfg.mcp_require_auth ? 'true' : 'false';
+    var portEl = document.getElementById('cfg-host-port');
+    if (portEl) portEl.value = cfg.host_port || '';
+    var portHint = document.getElementById('host-port-hint');
+    if (portHint) {
+      portHint.innerHTML = cfg.in_docker
+        ? 'Docker 部署：容器内端口固定，对外端口由 host 映射决定。保存后请在宿主跑 <code>OMBRE_HOST_PORT=端口 docker compose -f deploy/docker-compose.yml up -d</code>（或 <code>bash deploy/deploy.sh</code>）重建生效。'
+        : '裸机部署：保存后<b>重启服务</b>即监听新端口（留空=默认 18001）。';
+    }
     var sf = cfg.surfacing || {};
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
     document.getElementById('config-readonly').innerHTML =
-      'Transport: <strong>' + cfg.transport + '</strong><br>Buckets dir: <strong>' + cfg.buckets_dir + '</strong>';
+      'Transport: <strong>' + cfg.transport + '</strong><br>数据目录: <strong>' + cfg.buckets_dir + '</strong>'
+      + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
+      + '<br>对外端口: <strong>' + (cfg.host_port || '18001（默认）') + '</strong>';
   } catch (e) {
     document.getElementById('config-status').innerHTML =
       '<span style="color:var(--negative)">加载失败: ' + e.message + '</span>';
@@ -6692,6 +6714,34 @@ async function saveMcpAuth() {
     if (result.ok) {
       msg.style.color = 'var(--positive)';
       msg.textContent = '已保存，重启服务后生效';
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = result.error || '保存失败';
+    }
+  } catch (e) {
+    msg.style.color = 'var(--negative)';
+    msg.textContent = '请求失败: ' + e.message;
+  }
+}
+
+async function saveHostPort() {
+  const msg = document.getElementById('host-port-msg');
+  const raw = (document.getElementById('cfg-host-port').value || '').trim();
+  const port = raw === '' ? null : parseInt(raw, 10);
+  if (port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    msg.style.color = 'var(--negative)'; msg.textContent = '端口需为 1-65535'; return;
+  }
+  try {
+    const res = await authFetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host_port: port === null ? 18001 : port, persist: true }),
+    });
+    if (!res) return;
+    const result = await res.json();
+    if (result.ok) {
+      msg.style.color = 'var(--positive)';
+      msg.textContent = '已保存（按上方提示重启 / 重建生效）';
     } else {
       msg.style.color = 'var(--negative)';
       msg.textContent = result.error || '保存失败';
