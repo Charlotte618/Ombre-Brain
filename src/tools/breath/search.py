@@ -8,6 +8,8 @@ embedding_engine 向量近邻，结果合并去重，逐条 dehydrate 后塞 tok
 
 关键行为：
 - domain/valence/arousal 作为过滤参数传给 bucket_mgr.search
+- embedding 是强制依赖：未配置/未启用/调用失败直接拒绝整个检索，不再
+  降级回退到纯关键词通道（语义检索缺失 = 检索结果不完整，不能假装正常）
 - 向量通道阈值 sim>0.5；archived 桶不能从向量通道漂回（违反契约）
 - 命中后调 touch()，记忆重构会把展示层 valence 按当前情绪做 ±0.1 微调
 - 检索结果 < 3 时 40% 概率从低权重旧桶里随机漂出 1-3 条「忽然想起来」
@@ -36,6 +38,10 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     return all(t in bucket_tags for t in tag_filter)
 
 
+def _raw_core_fallback(content: str) -> str:
+    return strip_wikilinks(content)[:300].strip() or "（空记忆）"
+
+
 async def surface_search(
     query: str,
     max_results: int,
@@ -48,6 +54,12 @@ async def surface_search(
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
+
+    if not rt.embedding_engine or not getattr(rt.embedding_engine, "enabled", False):
+        raise RuntimeError(
+            "embedding 未配置或未启用，拒绝检索：语义检索是 breath(query=...) 的强制依赖。"
+            "请在设置中配置 OMBRE_EMBED_API_KEY，或用「本地向量模型」面板装好 Ollama + bge-m3。"
+        )
 
     try:
         matches = await rt.bucket_mgr.search(
@@ -64,24 +76,21 @@ async def surface_search(
     matches = [b for b in matches if b["metadata"].get("type") not in ("feel", "plan", "letter")]
     matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
 
-    # --- 向量通道 ---
+    # --- 向量通道（强制依赖，失败不降级，异常向上抛由调用方报错） ---
     matched_ids = {b["id"] for b in matches}
-    try:
-        vector_results = await rt.embedding_engine.search_similar(query, top_k=max(max_results, 20))
-        for bucket_id, sim_score in vector_results:
-            if bucket_id not in matched_ids and sim_score > 0.65:
-                bucket = await rt.bucket_mgr.get(bucket_id)
-                if (
-                    bucket
-                    and bucket["metadata"].get("type") not in ("feel", "plan", "letter", "archived")
-                    and _bucket_has_tags(bucket["metadata"], tag_filter)
-                ):
-                    bucket["score"] = round(sim_score * 100, 2)
-                    bucket["vector_match"] = True
-                    matches.append(bucket)
-                    matched_ids.add(bucket_id)
-    except Exception as e:
-        rt.logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
+    vector_results = await rt.embedding_engine.search_similar(query, top_k=max(max_results, 20))
+    for bucket_id, sim_score in vector_results:
+        if bucket_id not in matched_ids and sim_score > 0.65:
+            bucket = await rt.bucket_mgr.get(bucket_id)
+            if (
+                bucket
+                and bucket["metadata"].get("type") not in ("feel", "plan", "letter", "archived")
+                and _bucket_has_tags(bucket["metadata"], tag_filter)
+            ):
+                bucket["score"] = round(sim_score * 100, 2)
+                bucket["vector_match"] = True
+                matches.append(bucket)
+                matched_ids.add(bucket_id)
 
     results = []
     token_used = 0
@@ -90,18 +99,27 @@ async def surface_search(
             break
         try:
             clean_meta = {k: v for k, v in bucket["metadata"].items() if k != "tags"}
+            meta_b = bucket["metadata"]
+            is_core = meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent"
             # --- 记忆重构：根据当前情绪微调展示层 valence（±0.1）---
             if q_valence is not None and "valence" in clean_meta:
                 original_v = float(clean_meta.get("valence") or 0.5)
                 shift = (q_valence - 0.5) * 0.2
                 clean_meta["valence"] = max(0.0, min(1.0, original_v + shift))
-            summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            try:
+                summary = await rt.dehydrator.dehydrate(strip_wikilinks(bucket["content"]), clean_meta)
+            except Exception as dehy_err:
+                if not is_core:
+                    raise
+                rt.logger.warning(f"core search result dehydrate failed, using raw fallback: {dehy_err}")
+                summary = _raw_core_fallback(bucket["content"])
+            if is_core and not str(summary or "").strip():
+                summary = _raw_core_fallback(bucket["content"])
             summary_tokens = count_tokens_approx(summary)
             if token_used + summary_tokens > max_tokens:
                 break
             await rt.bucket_mgr.touch(bucket["id"])
-            meta_b = bucket["metadata"]
-            if meta_b.get("pinned") or meta_b.get("protected") or meta_b.get("type") == "permanent":
+            if is_core:
                 summary = f"📌 [核心准则] [bucket_id:{bucket['id']}] {summary}"
             elif bucket.get("vector_match"):
                 summary = f"[语义关联] [bucket_id:{bucket['id']}] {summary}"

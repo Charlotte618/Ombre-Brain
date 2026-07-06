@@ -222,10 +222,33 @@ def bm_config(tmp_path):
     }
 
 
+class _FakeEmbeddingEngine:
+    """最小化可用替身：embedding 现在是 create()/update(content=...) 的
+    强制依赖，这里的测试不验证 embedding 本身，给一个永远成功的假引擎。
+    （与 conftest.FakeEmbeddingEngine 同构但不跨文件 import——pytest 在
+    tests/ 是 package 的布局下，`from conftest import ...` 容易因为
+    sys.path 解析顺序在某些调用方式下找不到模块，保留各文件本地定义更稳妥。）
+    """
+
+    enabled = True
+
+    async def generate_and_store(self, bucket_id, content):
+        return True
+
+    def delete_embedding(self, bucket_id):
+        pass
+
+    async def get_embedding(self, bucket_id):
+        return [0.1, 0.2, 0.3]
+
+    async def search_similar(self, query, top_k=10):
+        return []
+
+
 @pytest.fixture
 def bucket_mgr(bm_config):
     from bucket_manager import BucketManager
-    return BucketManager(bm_config)
+    return BucketManager(bm_config, embedding_engine=_FakeEmbeddingEngine())
 
 
 class TestBucketManagerCreate:
@@ -297,16 +320,13 @@ class TestBucketManagerCreate:
         assert await count_pinned() == 0
 
     @pytest.mark.asyncio
-    async def test_decay_cycle_self_heals_orphan_permanent(self, bucket_mgr, decay_eng):
-        """孤儿固化桶（type==permanent 却 pinned=False）应在衰减周期被自动降级回 dynamic。
-
-        模拟历史脏数据：早期 unpin 只翻 pinned 标记、没降级 type，桶留在 permanent/。
-        这类桶 calculate_score 恒返 999、永不衰减、前端面板够不着。后台衰减循环应自愈。"""
+    async def test_decay_cycle_preserves_unpinned_permanent(self, bucket_mgr, decay_eng):
+        """type=permanent is a first-class bucket type, even without pinned=True."""
         import frontmatter as fm
 
         bid = await bucket_mgr.create(content="一条曾被钉选的准则")
         await bucket_mgr.update(bid, pinned=True)
-        # 手动制造孤儿：直接把 pinned 翻回 False，但保留 type=permanent、文件仍在 permanent/
+        # Simulate stored permanent content that has no pinned flag.
         fpath = bucket_mgr._find_bucket_file(bid)
         post = fm.load(fpath)
         post["pinned"] = False
@@ -315,15 +335,15 @@ class TestBucketManagerCreate:
 
         orphan = await bucket_mgr.get(bid)
         assert orphan["metadata"]["type"] == "permanent"
-        assert decay_eng.calculate_score(orphan["metadata"]) == 999.0  # 卡死的权重
+        assert decay_eng.calculate_score(orphan["metadata"]) == 999.0
 
-        # 跑一轮衰减 → 应自愈降级
-        await decay_eng.run_decay_cycle()
+        stats = await decay_eng.run_decay_cycle()
 
         healed = await bucket_mgr.get(bid)
-        assert healed["metadata"]["type"] == "dynamic"
+        assert stats["demoted_orphans"] == 0
+        assert healed["metadata"]["type"] == "permanent"
         assert healed["metadata"].get("pinned") is False
-        assert decay_eng.calculate_score(healed["metadata"]) != 999.0
+        assert decay_eng.calculate_score(healed["metadata"]) == 999.0
 
     @pytest.mark.asyncio
     async def test_importance_clamped_below_1(self, bucket_mgr):
@@ -633,7 +653,7 @@ def decay_config(tmp_path):
 def decay_engine(decay_config):
     from bucket_manager import BucketManager
     from decay_engine import DecayEngine
-    bm = BucketManager(decay_config)
+    bm = BucketManager(decay_config, embedding_engine=_FakeEmbeddingEngine())
     return DecayEngine(decay_config, bm)
 
 

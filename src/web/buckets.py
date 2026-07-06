@@ -17,6 +17,7 @@ import yaml
 from starlette.requests import Request
 from starlette.responses import Response
 
+from memory_messages import resolved_hint
 from . import _shared as sh
 
 logger = sh.logger
@@ -25,6 +26,11 @@ try:
     from utils import strip_wikilinks  # type: ignore
 except ImportError:  # pragma: no cover
     from ..utils import strip_wikilinks  # type: ignore
+
+try:
+    from tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
 
 
 async def rename_human_in_buckets(old: str, new: str) -> dict:
@@ -170,7 +176,7 @@ def register(mcp) -> None:
 
 
     # ---- Bucket-level mutation endpoints (iter 1.4) ----
-    # 桶维度变更端点：钉选/解钉、resolve toggle、归档、彻底删除
+    # 桶维度变更端点：钉选/解钉、resolve toggle、归档、删除到档案
     @mcp.custom_route("/api/bucket/{bucket_id}/pin", methods=["POST"])
     async def api_bucket_pin(request: Request) -> Response:
         """Toggle pinned flag (also flips type permanent⇄dynamic when needed)."""
@@ -187,6 +193,9 @@ def register(mcp) -> None:
         update_kwargs: dict[str, object] = {"pinned": new_pinned}
         # Pinning: importance jumps to 10 + type→permanent. Unpin reverts type→dynamic.
         if new_pinned:
+            quota_err = await _check_pinned_quota()
+            if quota_err:
+                return JSONResponse({"error": quota_err}, status_code=400)
             update_kwargs["importance"] = 10
             update_kwargs["type"] = "permanent"
         else:
@@ -213,7 +222,11 @@ def register(mcp) -> None:
         new_resolved = not bool(bucket["metadata"].get("resolved", False))
         try:
             await sh.bucket_mgr.update(bucket_id, resolved=new_resolved)
-            return JSONResponse({"ok": True, "resolved": new_resolved})
+            return JSONResponse({
+                "ok": True,
+                "resolved": new_resolved,
+                "message": resolved_hint(new_resolved),
+            })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -517,13 +530,13 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
     async def api_bucket_delete(request: Request) -> Response:
-        """Soft delete (F-10): requires ?confirm=true. Moves file to archive/ + stamps deleted_at."""
+        """Delete to archive (F-10): requires ?confirm=true. Moves file to archive/ + stamps deleted_at."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
         if request.query_params.get("confirm", "").lower() not in ("true", "1", "yes"):
-            return JSONResponse({"error": "confirm=true required for hard delete"}, status_code=400)
+            return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         bucket_id = request.path_params["bucket_id"]
         try:
             ok = await sh.bucket_mgr.delete(bucket_id)
@@ -536,12 +549,12 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/buckets/purge", methods=["POST"])
     async def api_buckets_purge(request: Request) -> Response:
-        """Dashboard-only hard purge: physically removes files and generates Claude notification.
+        """Dashboard-only hard purge: physically removes files and generates an AI notification.
 
         Only callable from the dashboard (requires X-Purge-Confirm header).
-        Not exposed as an MCP tool — Claude cannot trigger this.
+        Not exposed as an MCP tool — the AI cannot trigger this.
         After purge, _pending_deletions.json is written; the next tool call
-        sends a one-time notice to Claude about what was deleted.
+        sends a one-time notice to the AI about what was deleted.
         """
         from starlette.responses import JSONResponse
         import frontmatter as _fm

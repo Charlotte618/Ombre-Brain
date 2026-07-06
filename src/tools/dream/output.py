@@ -33,6 +33,7 @@ def format_dream_output(
     window_hours: int,
     connection_hint: str,
     crystal_hint: str,
+    core_context: list | None = None,
 ) -> str:
     parts = []
     for b in recent:
@@ -63,7 +64,26 @@ def format_dream_output(
         "没有沉淀就不写，不强迫产出。\n"
     )
 
-    final_text = header + "\n---\n".join(parts) + connection_hint + crystal_hint
+    final_text = header + "\n---\n".join(parts)
+
+    core_context = core_context or []
+    if core_context:
+        core_lines = []
+        for b in core_context:
+            meta = b["metadata"]
+            domains = ",".join(meta.get("domain", []))
+            core_lines.append(
+                f"📌 [{b['id']}] {meta.get('name', b['id'])} "
+                f"主题:{domains or '未分类'} 重要:{meta.get('importance', '?')}\n"
+                f"{strip_wikilinks(b['content']).strip()}"
+            )
+        final_text += (
+            "\n\n=== 核心准则参考 ===\n"
+            "这些是 pinned/permanent 桶，只作为梦里的边界与背景，不当作普通待消化事项。\n\n"
+            + "\n---\n".join(core_lines)
+        )
+
+    final_text += connection_hint + crystal_hint
 
     # --- active plan 段 ---
     try:

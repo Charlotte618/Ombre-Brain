@@ -10,10 +10,11 @@ breath 中。
 关键行为：
 - plan_create：去重（同正文 + status=active 已存在 → 直接返回原 ID），
   写入 type=plan + status + weight + change_log 起点
-- letter_write：原文永久保存，author 必须是 user/claude，写入
-  type=letter + author/title/letter_date 元数据
+- letter_write：原文永久保存，author 接受任意字符串署名（"ai" 或等于
+  ai_name 时统一存为 ai_name 的值，其它字符串原样存为署名；"user" 为
+  用户侧），写入 type=letter + author/title/letter_date 元数据
 - letter_read：默认按时间倒序；带 query 时走向量近邻；支持 author /
-  date_from / date_to 过滤；返回完整原文
+  date_from / date_to 过滤；author 字段原样返回存储的署名，不做转换
 
 不做什么（边界）：
 - plan 不做向量去重，只做精确文本去重
@@ -26,7 +27,7 @@ breath 中。
 from typing import Optional
 
 from .. import _runtime as rt
-from utils import strip_wikilinks
+from utils import strip_wikilinks, get_ai_name
 
 
 async def plan_create(
@@ -85,10 +86,8 @@ async def plan_create(
         await rt.bucket_mgr.update(bucket_id, **update_kwargs)
     except Exception as e:
         rt.logger.warning(f"plan() failed to set status/related: {e}")
-    try:
-        await rt.embedding_engine.generate_and_store(bucket_id, content)
-    except Exception:
-        pass
+    # 注意：bucket_mgr.create() 内部已调用 _sync_embedding 为 content 生成并存好
+    # 向量，这里不需要也不应该重复调用 generate_and_store（见 hold/feel.py 同类注释）。
     return f"📋plan→{bucket_id} [{status}]"
 
 
@@ -98,15 +97,30 @@ async def letter_write(
     user_name: Optional[str] = "",
     title: Optional[str] = "",
     date: Optional[str] = "",
+    ai_name: Optional[str] = "",
 ) -> str:
     if user_name is None: user_name = ""
     if title is None: title = ""
     if date is None: date = ""
-    a = author.strip().lower()
-    if a not in ("user", "claude"):
-        return "author 必须是 'user' 或 'claude'。"
+    # ai_name：显式传入优先，否则取环境变量 AI_NAME（回退 "AI"）。
+    ai = (ai_name or "").strip() or get_ai_name()
+    if not author or not author.strip():
+        return "author 不能为空。"
     if not content or not content.strip():
         return "信件内容不能为空。"
+
+    # 署名归一化：
+    #   - "user" → 用户侧，存 "user"（用户名另存 user_name，逻辑不变）
+    #   - "ai" / 等于 ai_name / 旧值 "claude"（历史兼容）→ 统一存 ai_name 的值
+    #   - 其它任意字符串 → 原样作为署名
+    raw = author.strip()
+    low = raw.lower()
+    if low == "user":
+        a = "user"
+    elif low in ("ai", "claude") or raw == ai:
+        a = ai
+    else:
+        a = raw
 
     extra_meta = {"author": a}
     if user_name.strip():
@@ -131,10 +145,8 @@ async def letter_write(
         await rt.bucket_mgr.update(bucket_id, **extra_meta)
     except Exception as e:
         rt.logger.warning(f"letter_write update meta failed: {e}")
-    try:
-        await rt.embedding_engine.generate_and_store(bucket_id, content)
-    except Exception:
-        pass
+    # 注意：bucket_mgr.create() 内部已调用 _sync_embedding 为 content 生成并存好
+    # 向量，这里不需要也不应该重复调用 generate_and_store。
     return f"💌letter→{bucket_id} [{a}]"
 
 
@@ -156,8 +168,19 @@ async def letter_read(
     except Exception as e:
         return f"读取信件失败: {e}"
     letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
-    if author.strip().lower() in ("user", "claude"):
-        letters = [b for b in letters if b["metadata"].get("author") == author.strip().lower()]
+    af = author.strip()
+    if af:
+        ai = get_ai_name()
+        af_low = af.lower()
+        if af_low == "user":
+            letters = [b for b in letters if b["metadata"].get("author") == "user"]
+        elif af_low in ("ai", "claude") or af == ai:
+            # AI 侧：匹配新署名 ai_name + 历史遗留的 "claude"
+            ai_aliases = {ai, "claude"}
+            letters = [b for b in letters if b["metadata"].get("author") in ai_aliases]
+        else:
+            # 任意自定义署名：精确匹配存储值
+            letters = [b for b in letters if b["metadata"].get("author") == af]
 
     def _within(b):
         d = b["metadata"].get("letter_date") or b["metadata"].get("created", "")
@@ -167,15 +190,39 @@ async def letter_read(
 
     letters = [b for b in letters if _within(b)]
 
-    if query and query.strip() and rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
+    query_text = query.strip()
+
+    def _matches_query(b):
+        if not query_text:
+            return True
+        meta = b.get("metadata", {})
+        parts = [
+            b.get("content", ""),
+            str(meta.get("name") or ""),
+            str(meta.get("title") or ""),
+            str(meta.get("author") or ""),
+        ]
+        parts.extend(str(t) for t in (meta.get("tags") or []))
+        return query_text.lower() in "\n".join(parts).lower()
+
+    if query_text and rt.embedding_engine and getattr(rt.embedding_engine, "enabled", False):
         try:
-            sims = await rt.embedding_engine.search_similar(query, top_k=limit * 3)
+            sims = await rt.embedding_engine.search_similar(query_text, top_k=limit * 3)
             id_score = {bid: sc for bid, sc in sims}
-            letters.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
+            vector_matches = [b for b in letters if b["id"] in id_score]
+            if vector_matches:
+                letters = vector_matches
+                letters.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
+            else:
+                letters = [b for b in letters if _matches_query(b)]
+                letters.sort(key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""), reverse=True)
         except Exception as e:
             rt.logger.warning(f"letter_read vector search failed: {e}")
+            letters = [b for b in letters if _matches_query(b)]
             letters.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
     else:
+        if query_text:
+            letters = [b for b in letters if _matches_query(b)]
         letters.sort(key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""), reverse=True)
 
     letters = letters[:limit]

@@ -44,6 +44,10 @@ def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
     return all(t in bucket_tags for t in tag_filter)
 
 
+def _raw_core_fallback(content: str) -> str:
+    return strip_wikilinks(content)[:300].strip() or "（空记忆）"
+
+
 async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
@@ -58,8 +62,13 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
     # pinned 优先级高于 anchor（她/他钉选的原则永远可见）。
     pinned_buckets = [
         b for b in all_buckets
-        if (b["metadata"].get("pinned") or b["metadata"].get("protected"))
+        if (
+            b["metadata"].get("pinned")
+            or b["metadata"].get("protected")
+            or b["metadata"].get("type") == "permanent"
+        )
         and b["metadata"].get("type") != "letter"
+        and not b["metadata"].get("anchor", False)  # 防御：anchor 是坐标系，永不主动浮现，即使 pinned
     ]
     pinned_ids = {b["id"] for b in pinned_buckets}
     pinned_results = []
@@ -67,11 +76,13 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         try:
             clean_meta = {k: v for k, v in b["metadata"].items() if k != "tags"}
             summary = await rt.dehydrator.dehydrate(strip_wikilinks(b["content"]), clean_meta)
+            if not str(summary or "").strip():
+                summary = _raw_core_fallback(b["content"])
             pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {summary}")
         except Exception as e:
             rt.logger.warning(f"Failed to dehydrate pinned bucket / 钉选桶脱水失败: {e}")
             # 降级：直接展示原文片段，确保核心准则永远可见
-            fallback = strip_wikilinks(b["content"])[:300].strip() or "（空记忆）"
+            fallback = _raw_core_fallback(b["content"])
             pinned_results.append(f"📌 [核心准则] [bucket_id:{b['id']}] {fallback}")
 
     # --- iter 2.0: anchor 桶在默认浮现模式的 *未解决池* 不出现（anchor 是坐标系不是浮现对象）---

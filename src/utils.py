@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import uuid
+import json
 import yaml
 import logging
 from pathlib import Path
@@ -55,13 +56,17 @@ _LOG_FALLBACK_DIR = "/tmp/ombre_logs"  # 所有候选路径都失败时的最终
 # sanitize_name() 桶名最大长度（防止文件名过长导致 OS 报错）。
 _BUCKET_NAME_MAX_LEN = 80
 
-# 进程启动那一刻就被「真实 OS / 平台」注入的 OMBRE_* 环境变量名集合（值非空才算）。
+# 进程启动那一刻就被「真实 OS / 平台」注入的可配置环境变量名集合（值非空才算）。
 # 在任何 dashboard 保存动作 mutate os.environ 之前快照——这是「平台级 env」与
 # 「运行时被 dashboard 写进 os.environ 的值」唯一可靠的区分依据。
 # 用途：dashboard 据此提示「这些字段由平台环境变量提供，重启会覆盖你这里保存的值」，
 # 修复「config.yaml 存了 Gemini，但平台 OMBRE_COMPRESS_BASE_URL=DeepSeek 每次重启盖回」的坑。
+BOOT_ENV_CONFIG: frozenset[str] = frozenset(
+    k for k, v in os.environ.items()
+    if (k.startswith("OMBRE_") or k == "AI_NAME") and str(v).strip()
+)
 BOOT_ENV_OMBRE: frozenset[str] = frozenset(
-    k for k, v in os.environ.items() if k.startswith("OMBRE_") and str(v).strip()
+    k for k in BOOT_ENV_CONFIG if k.startswith("OMBRE_")
 )
 
 
@@ -116,6 +121,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
             "api_key": "",
             "max_tokens": 4096,
             "temperature": 0.1,
+            "timeout_seconds": 60,
         },
         "decay": {
             "lambda": 0.05,
@@ -169,12 +175,14 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # Accept both names: OMBRE_COMPRESS_FORMAT (dashboard) and OMBRE_COMPRESS_API_FORMAT (legacy)
     _apply_env_override(config, "OMBRE_COMPRESS_FORMAT", "dehydration", "api_format")
     _apply_env_override(config, "OMBRE_COMPRESS_API_FORMAT", "dehydration", "api_format")
+    _apply_env_float_override(config, "OMBRE_COMPRESS_TIMEOUT_SECONDS", "dehydration", "timeout_seconds")
 
     # 向量化组（embedding）—— 写到 config["embedding"][*]
     _apply_env_override(config, "OMBRE_EMBED_API_KEY", "embedding", "api_key")
     _apply_env_override(config, "OMBRE_EMBED_BASE_URL", "embedding", "base_url")
     _apply_env_override(config, "OMBRE_EMBED_MODEL", "embedding", "model")
     _apply_env_override(config, "OMBRE_EMBED_FORMAT", "embedding", "api_format")
+    _apply_env_float_override(config, "OMBRE_EMBED_TIMEOUT_SECONDS", "embedding", "timeout_seconds")
 
     # 顶层运行时
     _apply_env_override(config, "OMBRE_TRANSPORT", "transport")
@@ -269,6 +277,56 @@ def _apply_env_override(config: dict, env_name: str, *path: str) -> None:
     for key in path[:-1]:
         cursor = cursor.setdefault(key, {})
     cursor[path[-1]] = value
+
+
+def positive_float(value, default: float) -> float:
+    """Parse a positive numeric config value, falling back to default."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if parsed <= 0:
+        return float(default)
+    return parsed
+
+
+def _apply_env_float_override(config: dict, env_name: str, *path: str) -> None:
+    value = os.environ.get(env_name, "").strip()
+    if not value or not path:
+        return
+    try:
+        parsed = float(value)
+    except ValueError:
+        return
+    if parsed <= 0:
+        return
+    cursor = config
+    for key in path[:-1]:
+        cursor = cursor.setdefault(key, {})
+    cursor[path[-1]] = int(parsed) if parsed.is_integer() else parsed
+
+
+def clean_llm_json(raw: str) -> str:
+    """Return the first complete JSON value from an LLM response.
+
+    Models sometimes wrap JSON in Markdown fences or add a short sentence before
+    or after it. Keep strict JSON validation in callers, but make the extraction
+    step tolerant enough to recover the balanced array/object.
+    """
+    cleaned = (raw or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(cleaned):
+        if ch not in "[{":
+            continue
+        try:
+            _value, end = decoder.raw_decode(cleaned[idx:])
+        except json.JSONDecodeError:
+            continue
+        return cleaned[idx:idx + end].strip()
+    return cleaned
 
 
 def _resolve_log_dir(explicit: str | None) -> str:
@@ -443,6 +501,16 @@ def get_version() -> str:
             # 这一条候选路径读不到就试下一条，不打日志（启动期无日志器）
             continue
     return "0.0.0+unknown"
+
+
+def get_ai_name() -> str:
+    """AI 一方的显示名 / display name for the AI side.
+
+    取自环境变量 `AI_NAME`，未设置或为空时回退到 "AI"。面向用户的文本
+    （prompt / UI / 错误信息）、letter 署名都用它，避免硬编码具体模型名。
+    Read from the `AI_NAME` env var; falls back to "AI" when unset/empty.
+    """
+    return os.environ.get("AI_NAME", "").strip() or "AI"
 
 
 def sanitize_name(name: str) -> str:

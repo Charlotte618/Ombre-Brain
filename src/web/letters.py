@@ -18,26 +18,48 @@ from starlette.responses import Response
 from . import _shared as sh
 
 try:
-    from utils import strip_wikilinks  # type: ignore
+    from utils import strip_wikilinks, get_ai_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks  # type: ignore
+    from ..utils import strip_wikilinks, get_ai_name  # type: ignore
+
+
+def _normalize_author(raw: str) -> str:
+    """把传入署名归一化为存储值，与 tools/plan/core.letter_write 同一套规则：
+    "user"→"user"；"ai"/"claude"(历史)/等于 ai_name→ai_name 的值；其它原样。"""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    ai = get_ai_name()
+    low = raw.lower()
+    if low == "user":
+        return "user"
+    if low in ("ai", "claude") or raw == ai:
+        return ai
+    return raw
 
 
 def register(mcp) -> None:
 
     @mcp.custom_route("/api/letters", methods=["GET"])
     async def api_letters(request: Request) -> Response:
-        """List all letters, newest first. Supports ?author=user|claude filter."""
+        """List all letters, newest first. Supports ?author=user|ai|<署名> filter."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
-        author = request.query_params.get("author", "").strip().lower()
+        author = request.query_params.get("author", "").strip()
         try:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
             letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
-            if author in ("user", "claude"):
-                letters = [b for b in letters if b["metadata"].get("author") == author]
+            if author:
+                af_low = author.lower()
+                if af_low == "user":
+                    letters = [b for b in letters if b["metadata"].get("author") == "user"]
+                elif af_low in ("ai", "claude") or author == get_ai_name():
+                    ai_aliases = {get_ai_name(), "claude"}
+                    letters = [b for b in letters if b["metadata"].get("author") in ai_aliases]
+                else:
+                    letters = [b for b in letters if b["metadata"].get("author") == author]
             letters.sort(
                 key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""),
                 reverse=True,
@@ -70,12 +92,21 @@ def register(mcp) -> None:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
-        author = (body.get("author") or "").strip().lower()
+        raw_author = (body.get("author") or "").strip()
         content = (body.get("content") or "").strip()
-        if author not in ("user", "claude"):
-            return JSONResponse({"error": "author must be 'user' or 'claude'"}, status_code=400)
+        if not raw_author:
+            return JSONResponse({"error": "author required"}, status_code=400)
         if not content:
             return JSONResponse({"error": "content required"}, status_code=400)
+        # ai_name：请求体显式传入优先，否则取环境变量 AI_NAME（回退 "AI"）。
+        ai = (body.get("ai_name") or "").strip() or get_ai_name()
+        low = raw_author.lower()
+        if low == "user":
+            author = "user"
+        elif low in ("ai", "claude") or raw_author == ai:
+            author = ai
+        else:
+            author = raw_author
         user_name = (body.get("user_name") or "").strip()
         title = (body.get("title") or "").strip()[:120]
         date = (body.get("date") or "").strip()
@@ -141,8 +172,8 @@ def register(mcp) -> None:
         if "title" in body and isinstance(body["title"], str):
             updates["title"] = body["title"].strip()[:120]
         if "author" in body:
-            a = str(body["author"]).strip().lower()
-            if a in ("user", "claude"):
+            a = _normalize_author(str(body["author"]))
+            if a:
                 updates["author"] = a
         if "user_name" in body and isinstance(body["user_name"], str):
             updates["user_name"] = body["user_name"].strip()
@@ -172,13 +203,13 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/letter/{letter_id}", methods=["DELETE"])
     async def api_letter_delete(request: Request) -> Response:
-        """Hard delete a letter. Requires ?confirm=true."""
+        """Delete a letter to archive. Requires ?confirm=true."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
         if request.query_params.get("confirm", "").lower() not in ("true", "1", "yes"):
-            return JSONResponse({"error": "confirm=true required"}, status_code=400)
+            return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         letter_id = request.path_params["letter_id"]
         bucket = await sh.bucket_mgr.get(letter_id)
         if not bucket or bucket["metadata"].get("type") != "letter":

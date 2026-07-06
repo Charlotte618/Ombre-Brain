@@ -28,6 +28,28 @@ from .. import _runtime as rt
 DREAM_MAX_CANDIDATES = 40
 
 
+def collect_core_context(all_buckets: list) -> list:
+    core = [
+        b for b in all_buckets
+        if (
+            b["metadata"].get("pinned", False)
+            or b["metadata"].get("protected", False)
+            or b["metadata"].get("type") == "permanent"
+        )
+        and b["metadata"].get("type") not in ("letter", "self", "i")
+        and not b["metadata"].get("dont_surface", False)
+    ]
+    core.sort(
+        key=lambda b: (
+            int(b["metadata"].get("importance") or 0),
+            b["metadata"].get("last_active") or b["metadata"].get("created", ""),
+            b.get("id", ""),
+        ),
+        reverse=True,
+    )
+    return core[:20]
+
+
 def collect_candidates(all_buckets: list, window_hours: int) -> list:
     candidates = [
         b for b in all_buckets

@@ -172,7 +172,7 @@ def register(mcp) -> None:
                 except Exception:
                     pass
             # --- plan 看板把 plan 显式标 resolved → 联动 related_bucket / resolved_by ---
-            # rule.md §1：与 trace_core 同一逻辑（人工/Claude 显式路径）。
+            # rule.md §1：与 trace_core 同一逻辑（人工/AI 显式路径）。
             cascaded: list[str] = []
             if updates.get("status") == "resolved":
                 from tools._common import cascade_plan_resolved_to_buckets
