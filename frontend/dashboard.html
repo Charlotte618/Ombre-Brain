@@ -11,14 +11,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@300;400;500;600&family=Noto+Sans+SC:wght@400;500&family=Cormorant+Garamond:ital,wght@0,400;0,500;1,400&family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
 <style>
-  @font-face {
-    font-family: 'RRPL';
-    src: url('/static/RRPL.ttf') format('truetype');
-    font-weight: normal;
-    font-style: normal;
-    font-display: swap;
-  }
-
   :root {
     /* === 复古掌机 retro-handheld palette — warm cream plastic + pale LCD + gold === */
     --bg: #E7E2D8;                    /* 外环境米灰（带颗粒感） */
@@ -841,7 +833,7 @@
     transition: transform .12s ease, box-shadow .15s ease, color .15s ease;
   }
   .tab .tab-en { font-family:'Share Tech Mono',monospace; font-style: normal; letter-spacing: 0.5px; }
-  .tab > span:first-child { font-family: 'RRPL', 'Noto Sans SC', sans-serif; font-weight: 700; letter-spacing: 0.3px; }
+  .tab > span:first-child { font-family: 'Share Tech Mono', 'Noto Sans SC', sans-serif; font-weight: 700; letter-spacing: 0.3px; }
   .tab:hover { transform: translateY(-1.5px); }
   .tab.active {
     color: var(--accent);
@@ -1756,6 +1748,12 @@
     Ombre Brain<span class="version-badge" id="version-badge"></span>
   </h1>
   <div class="header-meta">
+    <!-- 记忆归属徽标：多人共用一套 OB 时（owner_count>=2）显示「这份记忆是谁的」，单人隐藏。
+         由 loadOwnerBadge() 按 /api/config 的 owner_name / owner_count 填充。 -->
+    <span id="owner-badge" title="这份记忆的归属者（多人共用时显示）" style="display:none;font-size:11px;font-weight:600;color:var(--accent,#b85c3c);border:1px solid var(--accent,#b85c3c);border-radius:10px;padding:2px 9px;align-items:center;gap:4px;">
+      <i data-lucide="user" style="width:12px;height:12px;"></i>
+      <span id="owner-badge-text"></span>
+    </span>
     <span class="stats" id="stats">loading...</span>
     <span id="heartbeat-indicator" title="MCP 心跳" style="font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:4px;">
       <span id="heartbeat-dot" style="width:8px;height:8px;border-radius:50%;background:#bbb;display:inline-block;"></span>
@@ -1820,21 +1818,6 @@
     <div id="forgotten-list" style="margin-top:10px;"></div>
   </details>
 </div>
-
-<!-- purge-toolbar：进入 purge 模式后浮在 list-view 上方 -->
-<div id="purge-toolbar" style="display:none;position:sticky;top:56px;z-index:40;margin:0;padding:10px 40px;background:rgba(253,248,243,0.96);backdrop-filter:blur(8px);border-bottom:1px solid rgba(184,92,60,0.3);align-items:center;gap:10px;flex-wrap:wrap;">
-  <label style="font-size:12px;color:var(--text-dim);cursor:pointer;display:flex;align-items:center;gap:6px;">
-    <input type="checkbox" id="purge-select-all" onchange="purgeToggleAll(this.checked)" style="accent-color:var(--accent);"> 全选
-  </label>
-  <span id="purge-count-label" style="font-size:12px;color:var(--accent);min-width:60px;">已选 0 条</span>
-  <span style="font-size:11px;color:var(--text-dim);flex:1;">点击行选中；仅对当前显示的桶生效</span>
-  <button class="btn-danger" onclick="openPurgeConfirm()" id="purge-exec-btn" disabled
-    style="padding:5px 16px;font-size:12px;opacity:0.4;transition:opacity 0.2s;">
-    彻底清除所选
-  </button>
-  <button onclick="exitPurgeMode()" title="退出清理模式" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;padding:5px 9px;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="x-circle"></i> 退出</button>
-</div>
-
 
 <div class="content" id="breath-view" style="display:none">
   <div class="breath-flow" id="breath-flow">
@@ -2224,6 +2207,8 @@
           <span style="font-size:11px;color:var(--text-dim);margin-left:10px;">
             服务端自动下载新版并重启，记忆数据不受影响
           </span>
+          <!-- 热更新持久性提示（用户反馈 #1）：Docker 下如实说明「已持久化 / 重建后会失效」 -->
+          <div id="ver-persist-note" style="display:none;margin-top:10px;font-size:12px;line-height:1.5;border-radius:8px;padding:9px 12px;"></div>
         </div>
 
         <!-- 更新进度日志 -->
@@ -2405,15 +2390,15 @@
       <div>
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">宿主机记忆桶目录 (Docker)</div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
-          docker-compose 中 <code>${OMBRE_HOST_VAULT_DIR:-./buckets}:/data</code> 的宿主机路径。留空 = 项目内 <code>./buckets</code>。
-          <span style="color:var(--warning);"><svg class="icon icon-warn" aria-hidden="true"><use href="#i-warn"></use></svg> 修改后需在宿主机执行 <code>docker compose down && docker compose up -d</code> 才会生效。</span>
+          docker-compose 将 <code>${OMBRE_HOST_VAULT_DIR:-./buckets}</code> 挂到容器的 <code>/app/buckets</code>。留空 = compose 文件旁的 <code>./buckets</code>。
+          <span style="color:var(--warning);"><svg class="icon icon-warn" aria-hidden="true"><use href="#i-warn"></use></svg> 容器运行后不能修改宿主机挂载；请编辑 compose 文件旁的 <code>.env</code>，再执行 <code>docker compose up -d --force-recreate</code>。</span>
         </div>
         <div class="config-row">
           <label>路径</label>
           <input type="text" id="settings-host-vault" placeholder="例如 /Users/you/Obsidian/Ombre Brain" style="flex:1;" />
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
-          <button class="btn-primary" onclick="saveHostVault()" title="保存" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存</button>
+          <button id="settings-host-vault-save" class="btn-primary" onclick="saveHostVault()" title="保存" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存</button>
           <button onclick="loadHostVault()" title="重新加载" style="font-size:12px;padding:0 12px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="refresh-cw"></i> 重载</button>
           <span id="settings-host-vault-msg" style="font-size:12px;"></span>
         </div>
@@ -2833,9 +2818,10 @@
     <!-- ⑦ GitHub 同步 -->
     <div class="config-section" id="sec-github">
       <h3>⑦ GitHub 同步</h3>
-      <p style="font-size:12px;color:var(--text-light);margin:0 0 16px;line-height:1.6;">
-        将所有 bucket <code>.md</code> 文件备份到 GitHub 仓库，防止 VPS 实例丢失数据。<br>
-        每次同步创建一个 commit；embeddings.db 不上传（可用「重算所有向量」恢复）。
+      <p style="font-size:12px;color:var(--text-light);margin:0 0 16px;line-height:1.7;">
+        把你的记忆备份到自己的 GitHub 仓库，等于一份云端存档——换电脑、服务器挂了都能从这里拉回来。<br>
+        <b>同步</b>＝把本地记忆<b>上传</b>到 GitHub；<b>导入</b>＝把 GitHub 上的记忆<b>拉回</b>本地。两个方向别搞反。<br>
+        <span style="color:var(--text-dim);">（只备份记忆本身；用于加速搜索的「向量索引」不上传，导入后会自动重建，不影响记忆内容。）</span>
       </p>
 
       <div class="config-row">
@@ -2955,17 +2941,6 @@
         </div>
       </div>
 
-      <div>
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px;color:var(--accent);">清理错误导入</div>
-        <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;line-height:1.6;">
-          用于批量彻底删除记忆桶（物理删除，不可恢复）。<br>
-          <strong>仅用于清理批量导入时分析出错产生的垃圾记忆。</strong><br>
-          AI 无法触发此操作；删除后 AI 下次任意工具调用时会收到一次性通知。
-        </div>
-        <button class="btn-danger" onclick="enterPurgeMode()" style="padding:6px 18px;font-size:12px;">
-          进入清理模式（批量永久删除）
-        </button>
-      </div>
     </div>
 
   </div>
@@ -3796,7 +3771,10 @@ async function toolGithubSync() {
 async function loadHostVault() {
   const input = document.getElementById('settings-host-vault');
   const msg = document.getElementById('settings-host-vault-msg');
+  const saveBtn = document.getElementById('settings-host-vault-save');
   if (!input) return;
+  input.readOnly = false;
+  if (saveBtn) saveBtn.disabled = false;
   msg.textContent = '';
   msg.style.color = 'var(--text-dim)';
   try {
@@ -3804,7 +3782,12 @@ async function loadHostVault() {
     if (!resp) return;
     const d = await resp.json();
     input.value = d.value || '';
-    if (d.source === 'env') {
+    if (d.compose_managed) {
+      input.readOnly = true;
+      if (saveBtn) saveBtn.disabled = true;
+      msg.textContent = d.message || '该路径由宿主机 Compose 的 .env 管理';
+      msg.style.color = 'var(--warning)';
+    } else if (d.source === 'env') {
       msg.textContent = '当前由进程环境变量提供（修改 .env 不会立即覆盖）';
       msg.style.color = 'var(--warning)';
     } else if (d.source === 'file') {
@@ -4047,18 +4030,13 @@ function renderBuckets(buckets) {
     var stale = !b.pinned && !b.anchor && !b.dont_surface && daysSince(b.last_active || b.created) >= 45;
     var rowCls = 'bucket-row' + (stale ? ' faded' : '');
     var inlineStyle = b.dont_surface ? 'opacity:0.45;' : '';
-    // purge mode: prepend checkbox
-    var purgeChk = _purgeMode
-      ? '<input type="checkbox" class="purge-chk" data-id="' + b.id + '" data-name="' + esc(b.name) + '" onchange="purgeUpdateCount()" onclick="event.stopPropagation()" style="accent-color:var(--accent);margin-right:4px;flex-shrink:0;">'
-      : '';
-    var rowClick = _purgeMode ? 'onclick="purgeToggleRow(this)"' : 'onclick="showDetail(\'' + b.id + '\')"';
+    var rowClick = 'onclick="showDetail(\'' + b.id + '\')"';
     var domainHtml = (b.domain || []).length
       ? '<span class="domain-pill">' + esc((b.domain || []).join(', ')) + '</span>'
       : '';
     var emotionHtml = '<span class="emotion" style="display:inline-flex;align-items:center;gap:3px;"><span class="v-bar"><span class="v-dot" style="left:' + vPos + '%"></span></span>' + modelV + '</span>';
     return '<div class="' + rowCls + '" data-id="' + esc(b.id) + '" ' + rowClick + ' style="cursor:pointer;' + inlineStyle + '">' +
       '<div class="bucket-row-top">' +
-        purgeChk +
         '<span class="' + iconCls + '">' + iconHtml + '</span>' +
         '<span class="name" title="' + esc(b.name) + '">' + esc(b.name) + firstBadge + '</span>' +
         '<div class="bucket-row-tags">' +
@@ -4256,7 +4234,6 @@ async function bucketArchive(id) {
 
 async function bucketDelete(id) {
   if (!confirm('这会把此记忆桶移入删除档案，并从日常界面隐藏；文件仍保留在 archive/ 中。继续？')) return;
-  if (!confirm('再次确认：这不是物理抹除。彻底删除请使用清理模式。')) return;
   try {
     var res = await fetch(BASE + '/api/bucket/' + id + '?confirm=true', { method: 'DELETE' });
     if (!res.ok) throw new Error(await res.text());
@@ -4704,7 +4681,7 @@ function animateConceptNetwork(canvas, ctx, W, H, data) {
         if (label.length > 14) label = label.slice(0, 14) + '…';
         var prefix = n.kind === 'tag' ? '#' : '';
         ctx.fillStyle  = 'rgba(160,120,30,0.95)';
-        ctx.font       = "bold 11px 'Share Tech Mono', 'RRPL', sans-serif";
+        ctx.font       = "bold 11px 'Share Tech Mono', sans-serif";
         ctx.textAlign  = 'center';
         ctx.textBaseline = 'top';
         ctx.fillText((n.anchor ? '⚓ ' : '') + prefix + label, 0, 0);
@@ -5939,14 +5916,18 @@ async function runGithubSync() {
 }
 
 // 从 GitHub 导入/恢复（会覆盖本地同名记忆）→ 导入后自动重建向量
-async function runGithubImport() {
+async function runGithubImport(force) {
   var msg = document.getElementById('gh-msg');
   var btn = document.getElementById('gh-import-btn');
-  if (!confirm('⚠️ 从 GitHub 导入记忆\n\n会用 GitHub 仓库里的记忆覆盖本地【同名】记忆（本地独有的保留）。\n导入前会自动存一份本地 zip 备份，导入后自动重建向量索引。\n\n常用于换机/数据丢失后的恢复或回滚。确定导入？')) return;
+  if (!force && !confirm('从 GitHub 把记忆拉回本地。\n\n同名记忆会被 GitHub 上的版本覆盖，本地独有的记忆保留不动。\n导入前会自动存一份本地备份，万一不对可以退回。\n\n继续吗？')) return;
   if (btn) { btn.disabled = true; }
-  msg.textContent = '正在从 GitHub 拉回记忆…（导入前已自动备份本地）'; msg.style.color = '';
+  msg.textContent = '正在从 GitHub 拉回记忆…（已先备份本地）'; msg.style.color = '';
   try {
-    var res = await authFetch('/api/github/import', { method: 'POST' });
+    var res = await authFetch('/api/github/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: !!force }),
+    });
     var d = await readJsonSafe(res);
     if (d.ok) {
       var extra = (d.skipped ? '，跳过 ' + d.skipped : '') + (d.truncated ? '（⚠️ 仓库文件过多被截断，部分未导入）' : '');
@@ -5960,6 +5941,15 @@ async function runGithubImport() {
       }
       await loadGithubStatus();
       if (typeof loadStatus === 'function') loadStatus();
+    } else if (d.backup_failed) {
+      // 备份没成功 → 后端已拦下，未动本地记忆。让用户决定要不要冒险强制导入。
+      msg.innerHTML = _SV.err + ' ' + esc(d.error || '备份失败，已取消导入');
+      msg.style.color = 'var(--accent)';
+      if (btn) { btn.disabled = false; }
+      if (confirm('导入前的本地备份没做成功，所以这次没有「后悔药」。\n\n仍要强制从 GitHub 覆盖本地同名记忆吗？（覆盖后无法找回）')) {
+        return runGithubImport(true);
+      }
+      return;
     } else {
       msg.innerHTML = _SV.err + ' ' + esc(d.error || '导入失败');
       msg.style.color = 'var(--accent)';
@@ -5986,11 +5976,35 @@ async function _runBackfillSilent() {
   });
 }
 
+// 记忆归属徽标。规则：owner_count>=2 才显示（单人不打扰），文字取 owner_name。
+// 接受一个可选的已解析 cfg，避免重复请求；无则自行拉一次 /api/config。
+async function loadOwnerBadge(cfg) {
+  try {
+    if (!cfg) {
+      var res = await authFetch('/api/config');
+      if (!res) return;
+      cfg = await res.json();
+    }
+    var badge = document.getElementById('owner-badge');
+    if (!badge) return;
+    var count = parseInt(cfg.owner_count, 10) || 1;
+    var name = (cfg.owner_name || '').trim();
+    if (count >= 2 && name) {
+      document.getElementById('owner-badge-text').textContent = name;
+      badge.style.display = 'inline-flex';
+      if (window.lucide) lucide.createIcons();
+    } else {
+      badge.style.display = 'none';
+    }
+  } catch (e) { /* ignore：徽标是锦上添花，失败不影响主流程 */ }
+}
+
 async function loadConfig() {
   try {
     var res = await authFetch('/api/config');
     if (!res) return;
     var cfg = await res.json();
+    loadOwnerBadge(cfg);
     document.getElementById('cfg-dehy-model').value = cfg.dehydration.model || '';
     document.getElementById('cfg-dehy-url').value = cfg.dehydration.base_url || '';
     var fmtEl = document.getElementById('cfg-dehy-format');
@@ -6365,7 +6379,32 @@ loadVersionBadge();
       }
     }
 
+    renderPersistNote(info);
     panel.style.display = '';
+  }
+
+  // 按 /api/update-info 的持久性字段如实提示热更新会不会扛过容器重建（用户反馈 #1）。
+  function renderPersistNote(info) {
+    var el = document.getElementById('ver-persist-note');
+    if (!el) return;
+    // 裸机天然持久，无需打扰
+    if (!info || !info.is_docker || info.hot_update_persistent === undefined) {
+      el.style.display = 'none';
+      return;
+    }
+    var note = info.hot_update_note || '';
+    if (info.hot_update_persistent) {
+      el.style.background = 'rgba(46,160,67,0.12)';
+      el.style.border = '1px solid rgba(46,160,67,0.35)';
+      el.style.color = 'var(--positive, #2ea043)';
+      el.textContent = '✓ 热更新可持久：' + note;
+    } else {
+      el.style.background = 'rgba(210,153,34,0.14)';
+      el.style.border = '1px solid rgba(210,153,34,0.45)';
+      el.style.color = 'var(--warning, #d29922)';
+      el.textContent = '⚠️ 热更新不持久：' + note;
+    }
+    el.style.display = '';
   }
 
   window.doHotUpdate = async function() {
@@ -6631,21 +6670,30 @@ async function loadAbout() {
     var html = '<div style="background:var(--surface);border-radius:var(--shell-radius);padding:34px 36px 30px;' +
       'box-shadow:8px 8px 22px var(--shadow-dark-subtle), -7px -7px 16px var(--shadow-light), inset 0 1px 0 rgba(255,255,255,0.55);">';
     html += '<div style="font-family:\'VT323\',monospace;font-size:46px;line-height:1;color:var(--accent);text-shadow:0 0 14px var(--accent-glow);letter-spacing:1px;">' + esc(d.title || '') + '</div>';
-    html += '<div style="font-family:\'Share Tech Mono\',monospace;font-size:11px;letter-spacing:2px;color:var(--text-light);text-transform:uppercase;margin-top:6px;">AUTHOR · 作者有话说</div>';
+    html += '<div style="font-family:\'Share Tech Mono\',monospace;font-size:11px;letter-spacing:2px;color:var(--text-light);text-transform:uppercase;margin-top:6px;">AUTHOR · 一些</div>';
     html += '<div style="height:1px;background:var(--border);margin:18px 0 24px;"></div>';
     (d.sections || []).forEach(function(s) {
       html += '<h3 style="font-family:\'Share Tech Mono\',monospace;font-size:14px;color:var(--accent);margin:22px 0 10px;font-weight:400;letter-spacing:1px;text-transform:uppercase;">' + esc(s.heading) + '</h3>';
       html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;">' + esc(s.body) + '</div>';
     });
     if (d.signature) html += '<div style="margin-top:30px;text-align:right;color:var(--text-dim);font-family:\'Share Tech Mono\',monospace;font-size:14px;letter-spacing:1px;">' + esc(d.signature) + '</div>';
+    var _divider = '<div style="height:1px;background:var(--border);margin:26px 0;"></div>';
+    (d.contributors || []).forEach(function(c) {
+      html += _divider;
+      if (c.body) html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;text-align:center;">' + esc(c.body) + '</div>';
+      if (c.signature) html += '<div style="margin-top:10px;text-align:right;color:var(--text-dim);font-family:\'Share Tech Mono\',monospace;font-size:14px;letter-spacing:1px;">' + esc(c.signature) + '</div>';
+    });
+    if (d.support) {
+      html += _divider;
+      html += '<div style="white-space:pre-wrap;color:var(--text);line-height:2.0;font-family:\'Noto Serif SC\',Georgia,serif;text-align:center;">' + esc(d.support) + '</div>';
+    }
     if (d.ifdian) {
-      html += '<div style="margin-top:30px;padding:22px;background:var(--surface-solid);border-radius:14px;text-align:center;' +
+      html += '<div style="margin-top:24px;padding:22px;background:var(--surface-solid);border-radius:14px;text-align:center;' +
         'box-shadow:inset 3px 3px 8px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);">' +
-        '<div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;font-family:\'Share Tech Mono\',monospace;letter-spacing:0.5px;">如果它对你有用 / IF IT HELPED</div>' +
         '<a href="' + esc(d.ifdian) + '" target="_blank" rel="noopener" style="display:inline-block;color:#fffdf5;text-decoration:none;font-size:14px;padding:11px 26px;border-radius:13px;' +
         'background:linear-gradient(150deg, var(--accent-light), var(--accent));text-shadow:0 1px 1px rgba(120,90,20,0.35);' +
         'box-shadow:5px 5px 13px var(--shadow-dark), -4px -4px 10px var(--shadow-light), inset 0 1px 0 rgba(255,255,255,0.35);">' +
-        _SV.coffee + ' 在爱发电支持我 / Support on Afdian</a></div>';
+        _SV.coffee + ' 在爱发电支持我们 / Support on Afdian</a></div>';
     }
     html += '</div>';
     el.innerHTML = html;
@@ -6666,6 +6714,7 @@ window.addEventListener('DOMContentLoaded', function() {
   updateChick(0);              // 小黄鸡蛋初始（loadBuckets 后会按真实总数更新）
   startPlaceholderRotation();  // 搜索框随机 placeholder
   checkEmptyMemoryBanner();    // 零记忆时红色提示「可从 GitHub 恢复」
+  loadOwnerBadge();            // 多人共用时顶部显示记忆归属徽标（单人隐藏）
 });
 
 // 更新/换机后发现一条记忆都没有 → 顶部红色横幅，引导从 GitHub 恢复。
@@ -6981,7 +7030,8 @@ function renderV3DebugDecision(record, index) {
   const allowed = summary.policy_allowed;
   const badgeColor = ok && allowed ? 'var(--positive)' : (allowed ? 'var(--warning)' : 'var(--negative)');
   const surfaces = (summary.projection_surfaces || []).join(', ') || '-';
-  return '<button onclick="replayV3Decision(\'' + esc(record.id) + '\')" ' +
+  const recordId = esc(record.id || '');
+  return '<button data-decision-id="' + recordId + '" onclick="replayV3Decision(this.dataset.decisionId)" ' +
     'style="text-align:left;background:var(--surface-solid);border:1px solid var(--border);border-radius:4px;padding:10px 12px;cursor:pointer;color:var(--text);">' +
     '<div style="display:flex;align-items:center;gap:8px;font-size:12px;">' +
       '<span style="width:7px;height:7px;border-radius:50%;background:' + badgeColor + ';display:inline-block;flex-shrink:0;"></span>' +
@@ -7955,267 +8005,7 @@ function copyFeedback() {
     </div>
   </div>
 </div>
-<!-- ============================================================
-     批量硬删确认 Modal（3 步确认）
-     仅用户操作，AI 无法触发；删除后向 AI 发送一次性通知
-     全程展示待删除桶列表
-     ============================================================ -->
-<div id="purge-modal" style="display:none;position:fixed;inset:0;z-index:200;background:rgba(44,42,38,0.6);backdrop-filter:blur(4px);align-items:flex-start;justify-content:center;padding-top:40px;overflow-y:auto;">
-  <div style="background:var(--surface);border-radius:22px;max-width:520px;width:92%;padding:28px 28px 22px;box-shadow:0 20px 60px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.6), inset 0 0 0 2px rgba(190,90,65,0.35);margin-bottom:40px;">
-
-    <!-- 待删除列表（全程显示） -->
-    <div style="margin-bottom:18px;">
-      <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;letter-spacing:0.3px;">即将永久删除以下记忆桶（<span id="purge-modal-count">0</span> 条）：</div>
-      <div id="purge-modal-list"
-        style="max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:2px;padding:8px 10px;background:var(--bg);font-size:12px;line-height:1.9;color:var(--text);">
-      </div>
-    </div>
-
-    <!-- Step 1：勾选确认 -->
-    <div id="purge-step1">
-      <div style="font-size:13px;font-weight:600;color:var(--accent);margin-bottom:10px;">第 1 步 / 3 &nbsp;·&nbsp; 勾选确认</div>
-      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;color:var(--text);line-height:1.7;">
-        <input type="checkbox" id="purge-chk-confirm" onchange="purgeCheckStep1()"
-          style="accent-color:var(--accent);margin-top:3px;flex-shrink:0;">
-        <span>我知道这是<strong>永久删除</strong>，文件将从磁盘上完全移除，任何人包括 AI 都无法恢复。</span>
-      </label>
-      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
-        <button onclick="closePurgeModal()" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;padding:6px 16px;font-size:12px;cursor:pointer;">取消</button>
-        <button id="purge-next1" onclick="purgeGoStep2()" disabled
-          style="background:var(--accent);border:none;color:#fff;border-radius:2px;padding:6px 18px;font-size:12px;cursor:pointer;opacity:0.35;transition:opacity 0.2s;">下一步</button>
-      </div>
-    </div>
-
-    <!-- Step 2：手动输入 -->
-    <div id="purge-step2" style="display:none;">
-      <div style="font-size:13px;font-weight:600;color:var(--accent);margin-bottom:10px;">第 2 步 / 3 &nbsp;·&nbsp; 输入确认词</div>
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;line-height:1.6;">
-        在下方输入框中输入 <code style="background:var(--bg);padding:1px 6px;border-radius:2px;font-size:12px;">永久删除</code> 以继续：
-      </p>
-      <input id="purge-input2" type="text" autocomplete="off" placeholder="永久删除"
-        style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:2px;font-size:13px;font-family:inherit;margin-bottom:4px;"
-        oninput="purgeCheckStep2()">
-      <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
-        <button onclick="closePurgeModal()" style="background:none;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;padding:6px 16px;font-size:12px;cursor:pointer;">取消</button>
-        <button id="purge-next2" onclick="purgeGoStep3()" disabled
-          style="background:var(--accent);border:none;color:#fff;border-radius:2px;padding:6px 18px;font-size:12px;cursor:pointer;opacity:0.35;transition:opacity 0.2s;">下一步</button>
-      </div>
-    </div>
-
-    <!-- Step 3：长按解锁（交互阻尼，阻断误触） -->
-    <div id="purge-step3" style="display:none;">
-      <div style="font-size:13px;font-weight:600;color:var(--negative);margin-bottom:10px;">第 3 步 / 3 &nbsp;·&nbsp; 长按抹除</div>
-      <p style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.6;">
-        此操作将立即开始，无法中断。<strong>按住下方按键 1.5 秒不松手</strong>，待进度条充满后才会执行；中途松手则取消。
-      </p>
-      <button id="purge-final-btn" class="danger-hold-btn"
-        onmousedown="purgeHoldStart(event)" onmouseup="purgeHoldEnd()" onmouseleave="purgeHoldEnd()"
-        ontouchstart="purgeHoldStart(event)" ontouchend="purgeHoldEnd()">
-        <span class="fill" id="purge-hold-fill"></span>
-        <span class="lbl" id="purge-countdown-label">按住以确认抹除全部记忆</span>
-      </button>
-      <button class="danger-cancel" onclick="closePurgeModal()">取消</button>
-    </div>
-
-  </div>
-</div>
-
 <script>
-// ============================================================
-// Purge mode — 批量硬删（物理删除），仅用户可触发
-// ============================================================
-var _purgeMode = false;
-var _purgeCountdownTimer = null;
-
-function enterPurgeMode() {
-  // 切到记忆桶 tab，然后进入 purge 模式
-  var listTab = document.querySelector('.tab[data-tab="list"]');
-  if (listTab && !listTab.classList.contains('active')) listTab.click();
-  _purgeMode = true;
-  var tb = document.getElementById('purge-toolbar');
-  if (tb) { tb.style.display = 'flex'; }
-  renderBuckets(allBuckets || []);
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-function exitPurgeMode() {
-  _purgeMode = false;
-  var tb = document.getElementById('purge-toolbar');
-  if (tb) { tb.style.display = 'none'; }
-  renderBuckets(allBuckets || []);
-}
-
-function purgeToggleRow(row) {
-  var chk = row.querySelector('.purge-chk');
-  if (chk) { chk.checked = !chk.checked; purgeUpdateCount(); }
-}
-
-function purgeUpdateCount() {
-  var chks = document.querySelectorAll('.purge-chk:checked');
-  var n = chks.length;
-  var lbl = document.getElementById('purge-count-label');
-  var btn = document.getElementById('purge-exec-btn');
-  if (lbl) lbl.textContent = '已选 ' + n + ' 条';
-  if (btn) { btn.disabled = n === 0; btn.style.opacity = n > 0 ? '1' : '0.4'; }
-  var allChks = document.querySelectorAll('.purge-chk');
-  var sa = document.getElementById('purge-select-all');
-  if (sa && allChks.length > 0) sa.indeterminate = (n > 0 && n < allChks.length);
-  if (sa && allChks.length > 0) sa.checked = (n === allChks.length);
-}
-
-function purgeToggleAll(checked) {
-  document.querySelectorAll('.purge-chk').forEach(function(c) { c.checked = checked; });
-  purgeUpdateCount();
-}
-
-function getPurgeSelectedIds() {
-  var chks = document.querySelectorAll('.purge-chk:checked');
-  return Array.from(chks).map(function(c) { return c.getAttribute('data-id'); });
-}
-
-function getPurgeSelectedNames() {
-  var chks = document.querySelectorAll('.purge-chk:checked');
-  return Array.from(chks).map(function(c) {
-    return c.getAttribute('data-name') || c.getAttribute('data-id');
-  });
-}
-
-function openPurgeConfirm() {
-  var ids = getPurgeSelectedIds();
-  if (!ids.length) return;
-  var names = getPurgeSelectedNames();
-
-  // 更新 modal 内列表
-  document.getElementById('purge-modal-count').textContent = ids.length;
-  var listEl = document.getElementById('purge-modal-list');
-  listEl.innerHTML = names.map(function(n, i) {
-    return '<div style="padding:2px 0;border-bottom:1px solid var(--border);">' +
-      '<span style="color:var(--text-dim);margin-right:8px;">' + (i + 1) + '.</span>' +
-      esc(n) + '</div>';
-  }).join('');
-
-  // 重置步骤状态
-  document.getElementById('purge-chk-confirm').checked = false;
-  document.getElementById('purge-input2').value = '';
-  document.getElementById('purge-next1').disabled = true;
-  document.getElementById('purge-next1').style.opacity = '0.35';
-  document.getElementById('purge-next2').disabled = true;
-  document.getElementById('purge-next2').style.opacity = '0.35';
-  document.getElementById('purge-step1').style.display = '';
-  document.getElementById('purge-step2').style.display = 'none';
-  document.getElementById('purge-step3').style.display = 'none';
-
-  if (_purgeCountdownTimer) { clearInterval(_purgeCountdownTimer); _purgeCountdownTimer = null; }
-
-  var modal = document.getElementById('purge-modal');
-  modal.style.display = 'flex';
-}
-
-function closePurgeModal() {
-  if (_purgeCountdownTimer) { clearInterval(_purgeCountdownTimer); _purgeCountdownTimer = null; }
-  document.getElementById('purge-modal').style.display = 'none';
-}
-
-// Step 1: checkbox
-function purgeCheckStep1() {
-  var ok = document.getElementById('purge-chk-confirm').checked;
-  var btn = document.getElementById('purge-next1');
-  btn.disabled = !ok;
-  btn.style.opacity = ok ? '1' : '0.35';
-}
-
-function purgeGoStep2() {
-  document.getElementById('purge-step1').style.display = 'none';
-  document.getElementById('purge-step2').style.display = '';
-  setTimeout(function() { document.getElementById('purge-input2').focus(); }, 80);
-}
-
-// Step 2: type "永久删除"
-function purgeCheckStep2() {
-  var v = document.getElementById('purge-input2').value.trim();
-  var ok = (v === '永久删除');
-  var btn = document.getElementById('purge-next2');
-  btn.disabled = !ok;
-  btn.style.opacity = ok ? '1' : '0.35';
-}
-
-function purgeGoStep3() {
-  document.getElementById('purge-step2').style.display = 'none';
-  document.getElementById('purge-step3').style.display = '';
-  purgeHoldEnd(); // reset
-}
-
-// —— 长按解锁：按住 1.5s 进度充满才触发，中途松手取消 ——
-var _purgeHoldTimer = null;
-var _purgeHoldStart = 0;
-var HOLD_MS = 1500;
-function purgeHoldStart(e) {
-  if (e && e.preventDefault) e.preventDefault();
-  var btn = document.getElementById('purge-final-btn');
-  var fill = document.getElementById('purge-hold-fill');
-  var label = document.getElementById('purge-countdown-label');
-  if (!btn || btn.classList.contains('done')) return;
-  btn.classList.add('armed');
-  _purgeHoldStart = Date.now();
-  if (_purgeHoldTimer) cancelAnimationFrame(_purgeHoldTimer);
-  (function tick() {
-    var pct = Math.min(100, (Date.now() - _purgeHoldStart) / HOLD_MS * 100);
-    fill.style.width = pct + '%';
-    if (pct >= 100) {
-      btn.classList.add('done');
-      label.textContent = '正在抹除…';
-      executePurge();
-      return;
-    }
-    label.textContent = '继续按住…';
-    _purgeHoldTimer = requestAnimationFrame(tick);
-  })();
-}
-function purgeHoldEnd() {
-  if (_purgeHoldTimer) { cancelAnimationFrame(_purgeHoldTimer); _purgeHoldTimer = null; }
-  var btn = document.getElementById('purge-final-btn');
-  var fill = document.getElementById('purge-hold-fill');
-  var label = document.getElementById('purge-countdown-label');
-  if (btn && btn.classList.contains('done')) return;
-  if (btn) btn.classList.remove('armed');
-  if (fill) fill.style.width = '0%';
-  if (label) label.textContent = '按住以确认抹除全部记忆';
-}
-
-async function executePurge() {
-  var ids = getPurgeSelectedIds();
-  if (!ids.length) { closePurgeModal(); return; }
-  var btn = document.getElementById('purge-final-btn');
-  var label = document.getElementById('purge-countdown-label');
-  label.textContent = '删除中…';
-  btn.disabled = true;
-  try {
-    var res = await fetch(BASE + '/api/buckets/purge', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Purge-Confirm': 'dashboard-purge-v1',
-      },
-      body: JSON.stringify({ ids: ids }),
-    });
-    var data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    closePurgeModal();
-    exitPurgeMode();
-    await loadBuckets();
-    var msg = '已永久删除 ' + data.deleted + ' 条记忆桶。AI 将在下次工具调用时收到通知。';
-    if (data.failed && data.failed.length) msg += '\n未能删除：' + data.failed.join(', ');
-    alert(msg);
-  } catch (e) {
-    btn.disabled = false;
-    btn.classList.remove('done', 'armed');
-    var fill = document.getElementById('purge-hold-fill');
-    if (fill) fill.style.width = '0%';
-    label.textContent = '按住以确认抹除全部记忆';
-    alert('删除失败：' + e.message);
-  }
-}
-
 // ============================================================
 // Human name setting
 // ============================================================

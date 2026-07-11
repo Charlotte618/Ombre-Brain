@@ -166,7 +166,7 @@ src/web/
 ├── plans.py        # /api/plans(+/{id}/action) 看板
 ├── letters.py      # /api/letters / /api/letter 信件
 ├── hooks.py        # /breath-hook / /dream-hook（SessionStart 等 HTTP 钩子）+ Webhook
-├── buckets.py      # /api/buckets(+ pin/resolve/archive/forget/anchor/purge/edit/DELETE)
+├── buckets.py      # /api/buckets(+ pin/resolve/archive/forget/anchor/edit/DELETE；保留已退役 purge 拒绝端点)
 ├── import_api.py   # /api/import/*（上传 / 进度 / 暂停 / 规律 / 审阅）
 ├── github.py       # /api/github/*（GitHub 备份同步，封装 github_sync.py）
 ├── embedding.py    # /api/embedding/*（info / migrate / local 模型管理）
@@ -288,7 +288,7 @@ feel 桶自身：
 两种路径：
 
 - **Feel 模式** (`feel=True`)：跳过 LLM 分析，自动注入 `__feel__` 标签，写入 `feel/沉淀物/`。`source_bucket` 提供时把源桶标记为 `digested=True` 并写 `model_valence`。返回 `🫧feel→{id}`。
-- **普通模式**：`analyze()` → 用户传入的 `valence`/`arousal` 优先于 LLM 结果（B-09 修复）→ `_merge_or_create()`（相似度 > `merge_threshold` 合并，否则新建）→ 写 embedding → 异步触发 `_check_plan_resolution()` 扫 active plans。返回 `合并→{name}` 或 `新建→{name}`。
+- **普通模式**：`analyze()` → 用户传入的 `valence`/`arousal` 优先于 LLM 结果（B-09 修复）→ `_merge_or_create(raw_merge=True)`（相似度 > `merge_threshold` 时以分隔线追加原文，否则新建）→ 写 embedding → 异步触发 `_check_plan_resolution()` 扫 active plans。返回 `合并→{name}` 或 `新建→{name}`。`analyze()` 或 embedding 不可用时只降级元数据/向量索引，正文仍原样落盘；**hold 永远不调 `dehydrate()`/`merge()` 压缩正文**。
 
 (改动注意：`pinned=True` 走单独分支直接创建到 `permanent/`，importance 强制锁 10，不走合并；用户显式传 valence/arousal=0.0 也算「有效」，必须走 `0 <= v <= 1` 判定，不能用 `if valence` 否则 0.0 会被忽略——这就是 B-09。)
 
@@ -306,7 +306,7 @@ feel 桶自身：
 
 签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="")`
 
-- `delete=True` → `bucket_mgr.delete()` + `embedding_engine.delete_embedding()`。
+- `delete=True` → `bucket_mgr.delete()`：写入 `deleted_at` 并将 Markdown 移入 `archive/`；只清理可重建的 embedding 索引，不抹除记忆文件。
 - 其它字段：仅收集传入的（用 `-1`/空串作为「未传」哨兵）批量更新 frontmatter。
 - `pinned=1` 自动锁 importance=10 + 触发 `_move_bucket(permanent_dir)`。
 - `resolved=1` **不**自动归档（B-01 修复）；只更新 frontmatter，由 decay 引擎自然衰减。
@@ -407,7 +407,7 @@ feel 桶自身：
 | `/api/settings/sampling` | GET / POST | 🔒 | iter 1.9：dashboard 的加权采样面板。GET 返回当前 `surfacing.sampling.{enabled,top_k,sample_k,temperature}`；POST 校验范围后热更新到内存 config（不写回 yaml） |
 | `/api/anchors` | GET | 🔒 | iter 2.0：列出所有 anchor 桶（按 `created` 升序），返回 `{ok, count, limit, anchors:[...]}` |
 | `/api/bucket/{id}/anchor` | POST | 🔒 | iter 2.0：toggle anchor 标记。Body 可传 `{value: bool}` 强制设置；不传则切换。已满 24 时返回 **409** + `{error, count, limit}` |
-| `/api/bucket/{id}` | DELETE | 🔒 | 删除到档案：移入 `archive/` 并写 `deleted_at`，需 `?confirm=true`；物理删除只走 `/api/buckets/purge` |
+| `/api/bucket/{id}` | DELETE | 🔒 | 删除到档案：移入 `archive/` 并写 `deleted_at`，需 `?confirm=true`；不做物理抹除 |
 | `/api/letters` | GET | 🔒 | 信件列表，支持 `?author=user\|claude` |
 | `/api/letter` | POST | 🔒 | Dashboard 写信入口 |
 | `/api/search?q=` | GET | 🔒 | 搜索 |
@@ -422,8 +422,8 @@ feel 桶自身：
 | `/api/breath-debug?q=&valence=&arousal=` | GET | 🔒 | 评分调试（每桶四维分解） |
 | `/api/config` | GET | 🔒 | 配置查看（API key 脱敏） |
 | `/api/config` | POST | 🔒 | 热更新配置（dehydration / embedding / merge_threshold；可选持久化到 yaml） |
-| `/api/host-vault` | GET | 🔒 | 读 `OMBRE_HOST_VAULT_DIR`（process env → .env 文件 fallback） |
-| `/api/host-vault` | POST | 🔒 | 写入项目根目录的 `.env`，需重启 docker compose 生效 |
+| `/api/host-vault` | GET | 🔒 | 读 `OMBRE_HOST_VAULT_DIR`；Docker 内只报告 Compose 注入值并标记 `compose_managed` |
+| `/api/host-vault` | POST | 🔒 | 裸机可写项目 `.env`；Docker 内返回 409，避免假装容器能修改宿主机挂载 |
 | `/api/status` | GET | 🔒 | Dashboard 设置页用：版本号 + 桶数 + embedding/decay 状态 + 是否环境变量密码 |
 | `/api/import/upload` | POST | 🔒 | 上传对话历史并启动导入 |
 | `/api/import/status` | GET | 🔒 | 导入进度 |
@@ -446,7 +446,7 @@ feel 桶自身：
 | `/api/embedding/migrate` | POST | 🔒 | 触发后端切换 + 全量重算 embeddings（异步） |
 | `/api/embedding/migrate/status` | GET | 🔒 | 重算进度（done/total） |
 | `/api/settings/human` | GET / POST | 🔒 | 系统通知称呼（`OMBRE_HUMAN_NAME`），dashboard「① 我」面板 |
-| `/api/buckets/purge` | POST | 🔒 | 危险区批量物理删除（不可恢复，仅 dashboard 进入「清理模式」后可调） |
+| `/api/buckets/purge` | POST | 🔒 | 已退役的兼容端点：固定返回 `410 physical_deletion_forbidden`，不读写任何记忆 |
 | `/api/letter/{letter_id}` | PATCH | 🔒 | 改信件元数据（read_at 等） |
 | `/api/letter/{letter_id}` | DELETE | 🔒 | 删信件（移入 archive） |
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
@@ -1389,7 +1389,9 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `OMBRE_HOOK_URL` | — | Webhook 推送地址；空则不推送 |
 | `OMBRE_HOOK_SKIP` | `false` | `1`/`true`/`yes` 跳过推送 |
 | `OMBRE_DASHBOARD_PASSWORD` | — | 预设 Dashboard 密码（覆盖文件密码，UI 改密码功能禁用） |
-| `OMBRE_HOST_VAULT_DIR` | — | docker-compose 用：宿主机 vault 路径，写入项目根 `.env` 后 `docker compose down/up` 生效 |
+| `OMBRE_HOST_VAULT_DIR` | `./buckets` | docker-compose 用：宿主机持久目录；源码版写 `deploy/.env`，独立用户版写 compose 同目录 `.env`，挂载到 `/app/buckets` |
+| `TUNNEL_EDGE` | 双 global region | Compose 默认 `region1.v2.argotunnel.com:7844,region2.v2.argotunnel.com:7844`，绕过不支持 SRV 的 VPN DNS；显式留空恢复原生 edge discovery |
+| `TUNNEL_TRANSPORT_PROTOCOL` | `http2`（Compose） | Tunnel 到 edge 的传输协议；特殊 VPN 默认 TCP/HTTP2，设 `auto` 恢复 cloudflared 自动选择 |
 
 优先级：**环境变量 > config.yaml > 内置默认值**。读取入口都在 `utils.load_config()`（`OMBRE_EMBED_BACKEND` 例外，直接在 `embedding_engine.py` 读取）。新增 env 变量必须在那里注入到 config dict。
 
@@ -1557,8 +1559,8 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
 | HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，工具已回灌进 `mcp`）；URL 末尾必须 `/mcp` |
-| docker compose 重启后桶丢失 | — | volume 必须挂载到 `OMBRE_BUCKETS_DIR`（默认 `/data` 或 `/app/buckets`） |
-| Dashboard 改 host vault 不生效 | `web/config_api.py` | `_write_env_var`；写入 `.env` 后必须 `docker compose down/up` 重新挂载 |
+| docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
+| Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |
 | Webhook 不推送 | `server.py` | `_fire_webhook`；检查 `OMBRE_HOOK_URL` 和 `OMBRE_HOOK_SKIP` |
 | 配置热更新 dehydrator 没生效 | `web/config_api.py` | `api_config_update` 中 dehydrator 字段直接赋值 + 重建 `AsyncOpenAI` 客户端 |
@@ -1587,13 +1589,13 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 5. **dream feel 历史折叠已实现**。iter 2.0 后 dream 末尾的 feel 历史段按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算，超出的老 feel 折叠为 60 字符单行摘要。原记录「dream 全量返回 feel 历史不限数量」问题已闭合。
 
-6. **`OMBRE_HOST_VAULT_DIR` 写入 .env 后已提示需要重启**。POST 返回 `restart_required/message`，Dashboard 保存成功后直接显示这句提示。
+6. **`OMBRE_HOST_VAULT_DIR` 的 Docker 挂载改由宿主机 Compose 明确管理**。容器内 Dashboard 只读并给出 `.env` + `--force-recreate` 指令，避免把容器内 `src/.env` 的假保存误认为挂载已改变。
 
 7. **wikilink 配置项已废弃并从 `config.example.yaml` 移除 active stanza**。example 只保留 deprecated 说明，旧配置残留仍会被忽略。
 
 8. **`trace(resolved=1)` 与 `/api/bucket/{id}/resolve` 提示已统一**。两边共用 `resolved_hint()`，REST 返回 `message`，Dashboard 直接展示。
 
-9. **Dashboard 已区分「归档」「删除到档案」「永久删除」**。单桶 DELETE 是移入 `archive/` 并写 `deleted_at`；真正物理删除只在清理模式的 `/api/buckets/purge` 中出现。
+9. **Dashboard 只提供「主动遗忘」「归档」和「删除到档案」**。单桶 DELETE 会移入 `archive/` 并写 `deleted_at`；物理删除 UI 已移除，旧 `/api/buckets/purge` 仅返回 410。
 
 10. **冷启动检测最多 2 个**。`importance >= 8` 的新桶超过 2 个时，第 3 个开始按普通衰减分排队，可能被压在 top-20 后随机洗牌。如果用户一次性钉选 5 条核心准则后又新建 3 个 importance=10 的事件桶，会感到「我刚建的核心事件没浮现」。
 

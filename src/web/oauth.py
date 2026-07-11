@@ -36,18 +36,54 @@ logger = sh.logger
 _oauth_clients: dict[str, dict] = {}
 _oauth_codes: dict[str, dict] = {}    # code -> {client_id, redirect_uri, code_challenge, expires}
 _mcp_tokens: dict[str, float] = {}    # token -> expiry timestamp
-_mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id}
+_mcp_token_resources: dict[str, str] = {}  # token -> canonical MCP resource
+_mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id, resource}
 
 _OAUTH_CODE_TTL = 300               # 5 min
-_MCP_TOKEN_TTL = 86400 * 36500      # 100 年（实际永久）
-_MCP_REFRESH_TOKEN_TTL = 86400 * 36500
+_MCP_TOKEN_TTL = 86400 * 30         # 30 天；避免 100 年秒数溢出部分客户端的 32-bit duration
+_MCP_REFRESH_TOKEN_TTL = 86400 * 365
+_MCP_SCOPE = "mcp"
 
+
+def _first_forwarded(value: str) -> str:
+    """Return the first proxy header value (RFC 7239 chains are comma-separated)."""
+    return (value or "").split(",", 1)[0].strip()
 
 def _public_base_url(request: Request) -> str:
     """Return the externally-visible base URL, honoring Cloudflare/reverse-proxy headers."""
-    proto = (request.headers.get("x-forwarded-proto") or "").lower() or request.url.scheme
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
-    return f"{proto}://{host}"
+    proto = _first_forwarded(request.headers.get("x-forwarded-proto") or "").lower()
+    if proto not in ("http", "https"):
+        proto = request.url.scheme
+    host = _first_forwarded(
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or request.url.netloc
+    )
+    return f"{proto}://{host}".rstrip("/")
+
+
+def _normalize_resource(resource: str) -> str:
+    """Normalize an absolute OAuth resource URI for stable equality checks."""
+    try:
+        parsed = _urlparse.urlsplit(resource.strip())
+    except Exception:
+        return ""
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc or parsed.fragment:
+        return ""
+    path = parsed.path.rstrip("/")
+    return _urlparse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+
+
+def _mcp_resource(request: Request, requested: str = "") -> tuple[bool, str]:
+    """Validate/bind RFC 8707 resource to this server's canonical /mcp endpoint."""
+    base = _public_base_url(request)
+    canonical = f"{base}/mcp"
+    if not requested:
+        return True, canonical
+    normalized = _normalize_resource(requested)
+    if normalized in (_normalize_resource(base), _normalize_resource(canonical)):
+        return True, canonical
+    return False, canonical
 
 
 def _mcp_tokens_file() -> str:
@@ -55,7 +91,7 @@ def _mcp_tokens_file() -> str:
 
 
 def _load_mcp_tokens() -> None:
-    global _mcp_tokens, _mcp_refresh_tokens
+    global _mcp_tokens, _mcp_token_resources, _mcp_refresh_tokens
     try:
         path = _mcp_tokens_file()
         if not os.path.exists(path):
@@ -72,10 +108,21 @@ def _load_mcp_tokens() -> None:
             access_raw = raw
             refresh_raw = {}
 
-        _mcp_tokens = {
-            tok: exp for tok, exp in access_raw.items()
-            if isinstance(exp, (int, float)) and exp > now
-        }
+        _mcp_tokens = {}
+        _mcp_token_resources = {}
+        for tok, data in access_raw.items():
+            if isinstance(data, (int, float)):
+                exp = data
+                resource = ""
+            elif isinstance(data, dict):
+                exp = data.get("expires")
+                resource = str(data.get("resource", ""))
+            else:
+                continue
+            if isinstance(exp, (int, float)) and exp > now:
+                _mcp_tokens[tok] = exp
+                if resource:
+                    _mcp_token_resources[tok] = resource
         _mcp_refresh_tokens = {}
         for tok, data in refresh_raw.items():
             if isinstance(data, (int, float)):
@@ -90,6 +137,7 @@ def _load_mcp_tokens() -> None:
                 _mcp_refresh_tokens[tok] = {
                     "expires": exp,
                     "client_id": client_id,
+                    "resource": str(data.get("resource", "")) if isinstance(data, dict) else "",
                 }
     except Exception as e:
         logger.warning(f"[oauth] failed to load mcp tokens: {e}")
@@ -100,7 +148,14 @@ def _save_mcp_tokens() -> None:
         path = _mcp_tokens_file()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         now = _time_mod.time()
-        active = {tok: exp for tok, exp in _mcp_tokens.items() if exp > now}
+        active = {
+            tok: {
+                "expires": exp,
+                "resource": _mcp_token_resources.get(tok, ""),
+            }
+            for tok, exp in _mcp_tokens.items()
+            if exp > now
+        }
         active_refresh = {
             tok: data for tok, data in _mcp_refresh_tokens.items()
             if isinstance(data, dict)
@@ -124,27 +179,34 @@ def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
     return computed == code_challenge
 
 
-def _is_valid_mcp_token(token: str) -> bool:
+def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
     expiry = _mcp_tokens.get(token)
     if expiry is None:
         return False
     if _time_mod.time() > expiry:
         del _mcp_tokens[token]
+        _mcp_token_resources.pop(token, None)
         return False
+    bound_resource = _mcp_token_resources.get(token, "")
+    if resource and bound_resource:
+        return _normalize_resource(resource) == _normalize_resource(bound_resource)
     return True
 
 
-def _issue_mcp_access_token() -> str:
+def _issue_mcp_access_token(resource: str = "") -> str:
     token = secrets.token_urlsafe(32)
     _mcp_tokens[token] = _time_mod.time() + _MCP_TOKEN_TTL
+    if resource:
+        _mcp_token_resources[token] = resource
     return token
 
 
-def _issue_mcp_refresh_token(client_id: str) -> str:
+def _issue_mcp_refresh_token(client_id: str, resource: str = "") -> str:
     refresh_token = secrets.token_urlsafe(32)
     _mcp_refresh_tokens[refresh_token] = {
         "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
         "client_id": client_id,
+        "resource": resource,
     }
     return refresh_token
 
@@ -154,7 +216,7 @@ def _token_response(access_token: str, *, refresh_token: str | None = None) -> d
         "access_token": access_token,
         "token_type": "Bearer",
         "expires_in": _MCP_TOKEN_TTL,
-        "scope": "mcp",
+        "scope": _MCP_SCOPE,
     }
     if refresh_token:
         refresh_data = _mcp_refresh_tokens.get(refresh_token, {})
@@ -188,7 +250,8 @@ def _validate_authorize_redirect(client_id: str, redirect_uri: str) -> tuple[boo
 
 
 def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
-                           code_challenge: str, error: str = "") -> str:
+                           code_challenge: str, resource: str = "",
+                           scope: str = _MCP_SCOPE, error: str = "") -> str:
     e = _html_escape.escape
     try:
         from utils import get_ai_name  # type: ignore
@@ -222,6 +285,8 @@ button:hover{{background:#d4b87a}}
 <input type="hidden" name="redirect_uri" value="{e(redirect_uri)}">
 <input type="hidden" name="state" value="{e(state)}">
 <input type="hidden" name="code_challenge" value="{e(code_challenge)}">
+<input type="hidden" name="resource" value="{e(resource)}">
+<input type="hidden" name="scope" value="{e(scope)}">
 <input type="password" name="password" placeholder="输入 Dashboard 密码" autofocus>
 <button type="submit">授权并连接</button>
 </form>
@@ -247,6 +312,7 @@ def register(mcp) -> None:
             "resource": resource,
             "authorization_servers": [base],
             "bearer_methods_supported": ["header"],
+            "scopes_supported": [_MCP_SCOPE],
         })
 
     @mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
@@ -295,10 +361,22 @@ def register(mcp) -> None:
             ok, err = _validate_authorize_redirect(
                 p.get("client_id", ""), p.get("redirect_uri", "")
             )
+            resource_ok, resource = _mcp_resource(request, p.get("resource", ""))
+            if ok and not resource_ok:
+                ok, err = False, "resource 与当前 MCP 地址不匹配"
+            if ok and p.get("response_type", "code") != "code":
+                ok, err = False, "unsupported response_type"
+            if ok and not p.get("code_challenge"):
+                ok, err = False, "missing PKCE code_challenge"
+            if ok and p.get("code_challenge_method", "S256") != "S256":
+                ok, err = False, "仅支持 PKCE S256"
+            if ok and sh._is_setup_needed():
+                ok, err = False, "尚未设置 Dashboard 密码，请先打开 Dashboard 完成初始化"
             return HTMLResponse(_oauth_authorize_html(
                 p.get("client_id", ""), p.get("redirect_uri", ""),
-                p.get("state", ""), p.get("code_challenge", ""), error=err,
-            ), status_code=200 if ok else 400)
+                p.get("state", ""), p.get("code_challenge", ""),
+                resource=resource, scope=p.get("scope", _MCP_SCOPE), error=err,
+            ), status_code=200 if ok else (503 if sh._is_setup_needed() else 400))
         # POST
         form = await request.form()
         password     = str(form.get("password", ""))
@@ -306,15 +384,30 @@ def register(mcp) -> None:
         redirect_uri = str(form.get("redirect_uri", ""))
         state        = str(form.get("state", ""))
         code_challenge = str(form.get("code_challenge", ""))
+        requested_resource = str(form.get("resource", ""))
+        scope = str(form.get("scope", _MCP_SCOPE)) or _MCP_SCOPE
 
         ok, err = _validate_authorize_redirect(client_id, redirect_uri)
+        resource_ok, resource = _mcp_resource(request, requested_resource)
+        if ok and not resource_ok:
+            ok, err = False, "resource 与当前 MCP 地址不匹配"
+        if ok and not code_challenge:
+            ok, err = False, "missing PKCE code_challenge"
         if not ok:
             return HTMLResponse(_oauth_authorize_html(
-                client_id, redirect_uri, state, code_challenge, error=err
+                client_id, redirect_uri, state, code_challenge,
+                resource=resource, scope=scope, error=err
             ), status_code=400)
+        if sh._is_setup_needed():
+            return HTMLResponse(_oauth_authorize_html(
+                client_id, redirect_uri, state, code_challenge,
+                resource=resource, scope=scope,
+                error="尚未设置 Dashboard 密码，请先打开 Dashboard 完成初始化",
+            ), status_code=503)
         if not sh._verify_any_password(password):
             return HTMLResponse(_oauth_authorize_html(
-                client_id, redirect_uri, state, code_challenge, error="密码错误，请重试"
+                client_id, redirect_uri, state, code_challenge,
+                resource=resource, scope=scope, error="密码错误，请重试"
             ), status_code=401)
 
         code = secrets.token_urlsafe(32)
@@ -322,6 +415,8 @@ def register(mcp) -> None:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "code_challenge": code_challenge,
+            "resource": resource,
+            "scope": scope,
             "expires": _time_mod.time() + _OAUTH_CODE_TTL,
         }
         sep = "&" if "?" in redirect_uri else "?"
@@ -361,24 +456,60 @@ def register(mcp) -> None:
             stored_client_id = str(refresh_data.get("client_id", ""))
             if client_id and stored_client_id and client_id != stored_client_id:
                 return JSONResponse({"error": "invalid_grant", "error_description": "client_id mismatch"}, status_code=400)
+            stored_resource = str(refresh_data.get("resource", ""))
+            requested_resource = str(body.get("resource", ""))
+            resource_ok, canonical_resource = _mcp_resource(request, requested_resource)
+            if requested_resource and not resource_ok:
+                return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch"}, status_code=400)
+            if requested_resource and stored_resource and (
+                _normalize_resource(canonical_resource) != _normalize_resource(stored_resource)
+            ):
+                return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch"}, status_code=400)
 
-            token = _issue_mcp_access_token()
+            token = _issue_mcp_access_token(stored_resource or canonical_resource)
             _save_mcp_tokens()
-            return JSONResponse(_token_response(token, refresh_token=refresh_token))
+            return JSONResponse(
+                _token_response(token, refresh_token=refresh_token),
+                headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+            )
 
         code = str(body.get("code", ""))
         code_verifier = str(body.get("code_verifier", ""))
-        code_data = _oauth_codes.pop(code, None)
+        code_data = _oauth_codes.get(code)
         if not code_data:
             return JSONResponse({"error": "invalid_grant", "error_description": "unknown or expired code"}, status_code=400)
         if code_data["expires"] < _time_mod.time():
+            _oauth_codes.pop(code, None)
             return JSONResponse({"error": "invalid_grant", "error_description": "code expired"}, status_code=400)
+
+        client_id = str(body.get("client_id", ""))
+        if client_id and client_id != str(code_data.get("client_id", "")):
+            return JSONResponse({"error": "invalid_grant", "error_description": "client_id mismatch"}, status_code=400)
+        redirect_uri = str(body.get("redirect_uri", ""))
+        if redirect_uri and redirect_uri != str(code_data.get("redirect_uri", "")):
+            return JSONResponse({"error": "invalid_grant", "error_description": "redirect_uri mismatch"}, status_code=400)
+        stored_resource = str(code_data.get("resource", ""))
+        requested_resource = str(body.get("resource", ""))
+        resource_ok, canonical_resource = _mcp_resource(request, requested_resource)
+        if requested_resource and not resource_ok:
+            return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch"}, status_code=400)
+        if requested_resource and stored_resource and (
+            _normalize_resource(canonical_resource) != _normalize_resource(stored_resource)
+        ):
+            return JSONResponse({"error": "invalid_target", "error_description": "resource mismatch"}, status_code=400)
 
         if code_data.get("code_challenge"):
             if not code_verifier or not _verify_pkce(code_verifier, code_data["code_challenge"]):
                 return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
 
-        token = _issue_mcp_access_token()
-        refresh_token = _issue_mcp_refresh_token(str(code_data.get("client_id", "")))
+        _oauth_codes.pop(code, None)
+        token_resource = stored_resource or canonical_resource
+        token = _issue_mcp_access_token(token_resource)
+        refresh_token = _issue_mcp_refresh_token(
+            str(code_data.get("client_id", "")), token_resource
+        )
         _save_mcp_tokens()
-        return JSONResponse(_token_response(token, refresh_token=refresh_token))
+        return JSONResponse(
+            _token_response(token, refresh_token=refresh_token),
+            headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+        )

@@ -11,8 +11,8 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 - 创建/读取/更新/删除/搬家（move）都在这里
 - 检索 = 先按 domain 预筛，再按情感坐标 + 文本相似度加权排序
 - 情感坐标是 Russell 环形模型的连续值：valence 0~1（消极→积极），arousal 0~1（平静→激动）
-- create()/update(content=...)/delete() 自动同步 embedding 索引（iter 2.1+），
-  避免「文件存在但向量缺失」的孤儿桶导致 breath 检索数对不上 pulse
+- create()/update(content=...)/delete() 自动同步 embedding 索引（iter 2.1+）；
+  一般写入仍严格要求向量化，`hold` 则允许索引失败后保留原文待后补
 - iter 2.0：create() 接受 ``bucket_id_override``（feel 用分钟级可读 id），
   以及 ``source_tool`` / ``grow_batch_id`` 用于来源追踪
 
@@ -29,6 +29,7 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 import os
 import re
 import math
+import asyncio
 import logging
 import shutil
 import uuid
@@ -79,7 +80,7 @@ from typing import Any, Optional
 import frontmatter
 from rapidfuzz import fuzz
 
-from utils import generate_bucket_id, sanitize_name, safe_path, now_iso
+from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, parse_bool, parse_iso_datetime
 from bucket_scoring import (
     calc_topic_score,
     calc_emotion_score,
@@ -99,6 +100,32 @@ except ImportError:
     _BM25Index = None  # type: ignore
 
 logger = logging.getLogger("ombre_brain.bucket")
+
+
+def _atomic_write_text(path: str, text: str) -> None:
+    """原子写文本：写临时文件 → fsync → os.replace 就位。
+
+    记忆桶是最不能丢的东西。普通 open("w") 写到一半被杀 / 断电 / 磁盘写满，会把整条
+    记忆截断成半截、甚至清空。这里保证任何读者或崩溃恢复都只看到「旧的完整版」或
+    「新的完整版」，绝不出现半截文件。os.replace 在同一文件系统上是原子替换（POSIX + Windows 均是）。
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    # 临时名带 uuid：同进程内并发写同一桶时也不会撞到同一个 .tmp。
+    tmp = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ============================================================
@@ -220,6 +247,10 @@ class BucketManager:
         # BM25 稀疏索引（写操作后脏标记，search() 时懒重建）
         self._bm25: "_BM25Index | None" = _BM25Index() if _BM25Index is not None else None
         self._bm25_dirty: bool = True
+        self._bm25_rebuilding: bool = False
+
+        # Active-bucket cache is invalidated together with BM25 after writes.
+        self._active_cache: "list[dict] | None" = None
 
     def attach_v3_runtime(self, runtime) -> None:
         self.v3_runtime = runtime
@@ -370,9 +401,9 @@ class BucketManager:
     def _require_embedding_available(self) -> None:
         """create()/update(content=...) 落盘前的硬性前置校验。
 
-        embedding 是记忆系统的强制依赖，不再允许「文件已存在但向量缺失」的
-        降级状态：未配置 / 未启用直接拒绝整个写操作，调用方（hold/grow/trace）
-        据此向 MCP 客户端和 Dashboard 报错，不静默、不留孤儿桶。
+        默认写入严格要求 embedding；未配置 / 未启用时直接拒绝。
+        `hold` 会显式传入 allow_embedding_fallback=True，以“正文不丢”为更高优先级，
+        允许 Markdown 先落盘、向量稍后补齐。
         """
         if not self.embedding_engine or not getattr(self.embedding_engine, "enabled", False):
             raise RuntimeError(
@@ -393,8 +424,43 @@ class BucketManager:
         await self.embedding_engine.generate_and_store(bucket_id, content)
 
     def _invalidate_bm25(self) -> None:
-        """写操作后调用，标记 BM25 索引需要重建。search() 时懒触发。"""
+        """写操作后调用：标记 BM25 需重建 + 清活跃桶缓存（集合已变，缓存作废）。
+
+        名字沿用历史（各写路径已在调它），实际是「集合变更」的统一失效钩子。
+        """
         self._bm25_dirty = True
+        self._active_cache = None
+
+    def _cache_bump(self, bucket_id: str, *, last_active=None, activation_count=None) -> None:
+        """touch/ripple 只改了某桶的激活字段（集合没变）→ 就地更新缓存，不清整表。"""
+        if self._active_cache is None:
+            return
+        for b in self._active_cache:
+            if b.get("id") == bucket_id:
+                m = b.get("metadata")
+                if isinstance(m, dict):
+                    if last_active is not None:
+                        m["last_active"] = last_active
+                    if activation_count is not None:
+                        m["activation_count"] = activation_count
+                break
+
+    def _build_bm25_index(self, buckets: list):
+        """在线程里构建一个**全新**的 BM25 索引并返回（性能 P4：jieba 全库分词很慢）。"""
+        idx = _BM25Index()  # type: ignore[operator]
+        idx.build(buckets)
+        return idx
+
+    async def _rebuild_bm25_async(self, buckets: list) -> None:
+        """后台重建 BM25：to_thread 里建新索引，建好原子换入 self._bm25，不阻塞事件循环。"""
+        try:
+            fresh = await asyncio.to_thread(self._build_bm25_index, buckets)
+            self._bm25 = fresh          # 原子替换（单次赋值）
+            self._bm25_dirty = False
+        except Exception as e:
+            logger.warning(f"[bm25] 后台重建失败，保留旧索引: {e}")
+        finally:
+            self._bm25_rebuilding = False
 
     # ---------------------------------------------------------
     # Create a new bucket
@@ -420,6 +486,7 @@ class BucketManager:
         source_tool: str = "",
         grow_batch_id: str = "",
         bucket_id_override: str = "",
+        allow_embedding_fallback: bool = False,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -438,9 +505,10 @@ class BucketManager:
           ``feel_202605011423_V085``）。如果与已有桶冲突，自动追加秒级后缀。
           为空 → 走默认 ``generate_bucket_id()``（12 位 hex）。
         """
-        # 写文件之前先校验 embedding 可用——fail-fast，不留「文件已存在但
-        # 向量缺失」的孤儿桶（rule.md §1.5 的「不静默」现在延伸为「不降级」）。
-        self._require_embedding_available()
+        # 默认写入仍要求 embedding 可用。hold 明确选择 fallback 时，正文优先落盘，
+        # 缺失向量由 backfill 后补；这条例外不扩散到 grow/trace。
+        if not allow_embedding_fallback:
+            self._require_embedding_available()
 
         # F-04: 清洗 content / tags / name 中的危险控制字符和双向覆写符
         content = self._sanitize_text(content)
@@ -540,7 +608,7 @@ class BucketManager:
                 if "weight" in type_defaults and "weight" not in metadata and weight is None:
                     metadata["weight"] = _clamp01(type_defaults["weight"], _DEFAULT_VALENCE)
                 if "dont_surface" in type_defaults and "dont_surface" not in metadata:
-                    if bool(type_defaults["dont_surface"]):
+                    if parse_bool(type_defaults["dont_surface"], default=False):
                         metadata["dont_surface"] = True
                 if "why_remembered" in type_defaults and not why_remembered:
                     metadata["why_remembered"] = str(type_defaults["why_remembered"]).strip()[:_WHY_REMEMBERED_MAX]
@@ -596,8 +664,7 @@ class BucketManager:
         file_path = safe_path(target_dir, filename)
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket file / 写入桶文件失败: {file_path}: {e}")
             raise
@@ -613,12 +680,17 @@ class BucketManager:
         # 文件已经写盘，異常向上抛由调用方决定是否清理半成品文件。
         try:
             await self._sync_embedding(bucket_id, linked_content)
-        except Exception:
-            try:
-                os.remove(file_path)
-            except OSError:
-                pass
-            raise
+        except Exception as exc:
+            if not allow_embedding_fallback:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+                raise
+            logger.warning(
+                f"hold embedding unavailable; kept raw bucket for later backfill / "
+                f"hold 向量化不可用，已保留原文待后补: {bucket_id}: {type(exc).__name__}: {exc}"
+            )
         self._invalidate_bm25()
         self._record_v3_bucket_event(
             "create",
@@ -683,7 +755,13 @@ class BucketManager:
     # 更新桶
     # Supports: content, tags, importance, valence, arousal, name, resolved
     # ---------------------------------------------------------
-    async def update(self, bucket_id: str, **kwargs) -> bool:
+    async def update(
+        self,
+        bucket_id: str,
+        *,
+        allow_embedding_fallback: bool = False,
+        **kwargs,
+    ) -> bool:
         """
         Update bucket content or metadata fields.
         更新桶的内容或元数据字段。
@@ -694,8 +772,22 @@ class BucketManager:
 
         # content 改动会触发 embedding 重新生成（见下方 _sync_embedding 调用），
         # 同样要求 fail-fast：embedding 不可用就拒绝，不碰文件（不写入半新半旧状态）。
-        if "content" in kwargs:
+        if "content" in kwargs and not allow_embedding_fallback:
             self._require_embedding_available()
+
+        # Normalize public/migration inputs at the storage boundary.  A quoted
+        # YAML value such as "false" must never be persisted as true merely
+        # because Python considers non-empty strings truthy.
+        for field in (
+            "resolved",
+            "pinned",
+            "digested",
+            "dont_surface",
+            "first_of_kind",
+            "anchor",
+        ):
+            if field in kwargs:
+                kwargs[field] = parse_bool(kwargs[field])
 
         try:
             post = frontmatter.load(file_path)
@@ -705,8 +797,10 @@ class BucketManager:
 
         # --- Pinned/protected buckets: lock importance to 10, ignore importance changes ---
         # --- 钉选/保护桶：importance 不可修改，强制保持 10 ---
-        was_pinned = bool(post.get("pinned", False))
-        is_pinned = post.get("pinned", False) or post.get("protected", False)
+        was_pinned = parse_bool(post.get("pinned", False), default=False)
+        is_pinned = was_pinned or parse_bool(
+            post.get("protected", False), default=False
+        )
         if is_pinned:
             kwargs.pop("importance", None)  # silently ignore importance update
 
@@ -726,14 +820,14 @@ class BucketManager:
         if "name" in kwargs:
             post["name"] = sanitize_name(kwargs["name"])
         if "resolved" in kwargs:
-            post["resolved"] = bool(kwargs["resolved"])
+            post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:
-            post["pinned"] = bool(kwargs["pinned"])
+            post["pinned"] = kwargs["pinned"]
             if kwargs["pinned"]:
                 post["importance"] = _PINNED_IMPORTANCE  # pinned → lock importance to 10
                 post.metadata.pop("anchor", None)  # pinned 与 anchor 互斥：钉为核心准则即清除坐标系标记
         if "digested" in kwargs:
-            post["digested"] = bool(kwargs["digested"])
+            post["digested"] = kwargs["digested"]
         if "model_valence" in kwargs:
             post["model_valence"] = _clamp01(kwargs["model_valence"], _DEFAULT_VALENCE)
         # --- Pass-through fields for plan/letter lifecycle ---
@@ -764,16 +858,18 @@ class BucketManager:
                 if k == "weight" and kwargs[k] is not None:
                     post[k] = _clamp01(kwargs[k], _DEFAULT_VALENCE)
                 elif k == "dont_surface":
-                    post[k] = bool(kwargs[k])
+                    post[k] = kwargs[k]
                 elif k == "first_of_kind":
-                    post[k] = bool(kwargs[k])
+                    post[k] = kwargs[k]
                 elif k == "anchor":
                     # iter 2.0: anchor 是布尔；False 时直接删除字段保持 frontmatter 干净。
                     # 修复：透传路径之前会绕过 ANCHOR_LIMIT，导致批量脚本/前端直接 update(anchor=True)
                     # 可以让 anchor 总数突破 24 上限。这里补一道校验：
                     # 仅当从 False→True 切换时才计数；当前已是 anchor 的桶重复设置不计数。
-                    if bool(kwargs[k]):
-                        already_anchor = bool(post.get("anchor", False))
+                    if kwargs[k]:
+                        already_anchor = parse_bool(
+                            post.get("anchor", False), default=False
+                        )
                         if not already_anchor:
                             # FIX (RED-02): count_anchors 是 async，必须 await，否则
                             # `coroutine >= int` 会 TypeError，整个上限校验失效。
@@ -798,8 +894,7 @@ class BucketManager:
         post["last_active"] = now_iso()
 
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket update / 写入桶更新失败: {file_path}: {e}")
             return False
@@ -812,8 +907,7 @@ class BucketManager:
         domain: list[str] = post.get("domain") or ["未分类"]  # type: ignore[assignment]
         if kwargs.get("pinned") and post.get("type") != "permanent":
             post["type"] = "permanent"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
             self._move_bucket(file_path, self.permanent_dir, domain)
         # --- Reverse: unpin → demote only buckets that were actually pinned.
         # `type=permanent` is also a first-class bucket type, so an idempotent
@@ -822,12 +916,11 @@ class BucketManager:
             "pinned" in kwargs
             and not kwargs.get("pinned")
             and was_pinned
-            and not post.get("protected")
+            and not parse_bool(post.get("protected", False), default=False)
             and post.get("type") == "permanent"
         ):
             post["type"] = "dynamic"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
             self._move_bucket(file_path, self.dynamic_dir, domain)
 
         logger.info(f"Updated bucket / 更新记忆桶: {bucket_id}")
@@ -837,7 +930,16 @@ class BucketManager:
         # 失败不再静默吞掉——异常向上抛，调用方（trace 等）据此向用户报错。
         # 注意：文件内容此时已落盘，调用方需要知道这是「半失败」状态。
         if "content" in kwargs:
-            await self._sync_embedding(bucket_id, post.content or "")
+            try:
+                await self._sync_embedding(bucket_id, post.content or "")
+            except Exception as exc:
+                if not allow_embedding_fallback:
+                    raise
+                logger.warning(
+                    f"hold merge embedding unavailable; kept appended raw content / "
+                    f"hold 合并后向量化不可用，已保留追加原文待后补: "
+                    f"{bucket_id}: {type(exc).__name__}: {exc}"
+                )
         self._invalidate_bm25()
         self._record_v3_bucket_event(
             "update",
@@ -898,8 +1000,7 @@ class BucketManager:
                     self.archive_dir,
                     f"{os.path.splitext(os.path.basename(file_path))[0]}_{bucket_id}.md",
                 )
-            with open(dest, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(dest, frontmatter.dumps(post))
             if dest != file_path:
                 os.remove(file_path)
         except OSError as e:
@@ -937,12 +1038,14 @@ class BucketManager:
     # Called on every recall hit; affects decay score.
     # 每次检索命中时调用，影响衰减得分。
     # ---------------------------------------------------------
-    async def touch(self, bucket_id: str) -> None:
+    async def touch(self, bucket_id: str, ripple: bool = True) -> None:
         """
         Update a bucket's last activation time and count.
         Also triggers time ripple: nearby memories get a slight activation boost.
         更新桶的最后激活时间和激活次数。
         同时触发时间涟漪：时间上相邻的记忆轻微唤醒。
+
+        ripple=False 可跳过读全库的时间涟漪（性能 P2：批量浮现时不值当为它多跑 list_all）。
         """
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
@@ -953,13 +1056,16 @@ class BucketManager:
             post["last_active"] = now_iso()
             post["activation_count"] = int(post.get("activation_count") or 0) + 1  # type: ignore[call-overload]
 
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
+            self._cache_bump(bucket_id, last_active=post["last_active"], activation_count=post["activation_count"])
 
             # --- Time ripple: boost nearby memories within ±48h ---
             # --- 时间涟漪：±48小时内的记忆轻微唤醒 ---
-            current_time = datetime.fromisoformat(str(post.get("created", post.get("last_active", ""))))
-            await self._time_ripple(bucket_id, current_time)
+            if ripple:
+                current_time = parse_iso_datetime(
+                    post.get("created", post.get("last_active", ""))
+                )
+                await self._time_ripple(bucket_id, current_time)
             self._record_ledger_event(
                 "TraceTouched",
                 bucket_id,
@@ -969,6 +1075,21 @@ class BucketManager:
             )
         except Exception as e:
             logger.warning(f"Failed to touch bucket / 触碰桶失败: {bucket_id}: {e}")
+
+    async def touch_many(self, bucket_ids: list, ripple: bool = False) -> None:
+        """批量 touch（性能 P2）：breath 浮现后一次性更新一批桶的激活，供后台任务调用。
+
+        ripple 默认 False —— 时间涟漪是「可选的激活微调」，在批量浮现时不值当为它多跑
+        list_all；需要时可显式开启（只对第一个桶做一次涟漪，避免 N×list_all）。
+        单条失败不影响其他。
+        """
+        first = True
+        for bid in bucket_ids:
+            try:
+                await self.touch(bid, ripple=ripple and first)
+            except Exception as e:
+                logger.warning(f"touch_many: 触碰 {bid} 失败: {e}")
+            first = False
 
     async def _time_ripple(self, source_id: str, reference_time: datetime, hours: float = _RIPPLE_HOURS) -> None:
         """
@@ -994,7 +1115,7 @@ class BucketManager:
 
             created_str = meta.get("created", meta.get("last_active", ""))
             try:
-                created = datetime.fromisoformat(str(created_str))
+                created = parse_iso_datetime(created_str)
                 delta_hours = abs((reference_time - created).total_seconds()) / 3600
             except (ValueError, TypeError):
                 continue
@@ -1009,8 +1130,8 @@ class BucketManager:
                     current_count = float(post.get("activation_count") or 0)  # type: ignore[arg-type]
                     # Store as float for fractional increments; calculate_score handles it
                     post["activation_count"] = round(current_count + _RIPPLE_BOOST, 1)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(frontmatter.dumps(post))
+                    _atomic_write_text(file_path, frontmatter.dumps(post))
+                    self._cache_bump(bucket["id"], activation_count=post["activation_count"])
                     rippled += 1
                 except Exception as _ripple_exc:
                     logger.warning(
@@ -1092,12 +1213,19 @@ class BucketManager:
             except Exception as e:
                 logger.warning(f"Embedding score failed, using fuzzy only / embedding 评分失败: {e}")
 
-        # --- BM25 懒重建 ---
-        # all_buckets 已在上方加载，直接复用；写操作后脏标记触发重建
-        if self._bm25 is not None and self._bm25_dirty:
-            self._bm25.build(all_buckets)
-            self._bm25_dirty = False
-        bm25_scores: dict[str, float] = self._bm25.score(query) if self._bm25 is not None else {}
+        # --- BM25 打分（性能 P4：脏了就后台线程重建，不在请求里同步阻塞 ~17s）---
+        # 脏且没人在重建 → 起一个后台重建；本次查询用「当前索引」打分（首次为空，
+        # 之后是上一版，略旧但有效）。向量+模糊+字面召回仍在，单次查询不会因 BM25 卡住。
+        bm25_scores: dict[str, float] = {}
+        if self._bm25 is not None:
+            if self._bm25_dirty and not self._bm25_rebuilding:
+                self._bm25_rebuilding = True
+                asyncio.create_task(self._rebuild_bm25_async(all_buckets))
+            try:
+                bm25_scores = self._bm25.score(query)
+            except Exception as e:
+                logger.warning(f"[bm25] score 失败，本次跳过 BM25 维度: {e}")
+                bm25_scores = {}
 
         # --- Layer 2: weighted multi-dim ranking ---
         # --- 第二层：多维加权精排 ---
@@ -1226,8 +1354,10 @@ class BucketManager:
         bucket = await self.get(bucket_id)
         if not bucket:
             return {"ok": False, "error": "bucket not found", "count": 0, "limit": self.ANCHOR_LIMIT}
-        current_value = bool(bucket["metadata"].get("anchor", False))
-        target = bool(value)
+        current_value = parse_bool(
+            bucket["metadata"].get("anchor", False), default=False
+        )
+        target = parse_bool(value)
         # Idempotent: same state → noop
         if current_value == target:
             count = await self.count_anchors()
@@ -1310,6 +1440,13 @@ class BucketManager:
         Recursively walk directories (including domain subdirs), list all buckets.
         递归遍历目录（含域子目录），列出所有记忆桶。
         """
+        # 活跃桶集走缓存（不含 archive；archive 每次照旧读盘，量小且极少用）。
+        # 命中返回「每个桶浅拷贝」的新列表：顶层键（如 search 里写的 score/vector_match）
+        # 落在拷贝上、不污染缓存；metadata 为共享引用，热路径读取前都会先 dict 拷贝再改，
+        # 故不会回写缓存（见 search.py 的 clean_meta）。
+        if not include_archive and self._active_cache is not None:
+            return [dict(b) for b in self._active_cache]
+
         buckets = []
         dirs = list(self._active_dirs)
         if include_archive:
@@ -1319,6 +1456,9 @@ class BucketManager:
             bucket = self._load_bucket(file_path)
             if bucket:
                 buckets.append(bucket)
+
+        if not include_archive:
+            self._active_cache = [dict(b) for b in buckets]
 
         return buckets
 
@@ -1392,11 +1532,15 @@ class BucketManager:
             os.makedirs(archive_subdir, exist_ok=True)
 
             dest = safe_path(archive_subdir, os.path.basename(file_path))
+            # 防撞名：archive/ 里已有同名文件时，追加 bucket_id 后缀，避免 shutil.move
+            # 把一条早先归档的记忆悄悄覆盖掉（与 delete() 的软删除保护一致）。
+            if os.path.exists(dest) and os.path.abspath(dest) != os.path.abspath(file_path):
+                stem = os.path.splitext(os.path.basename(file_path))[0]
+                dest = safe_path(archive_subdir, f"{stem}_{bucket_id}.md")
 
             # Update type marker then move file / 更新类型标记后移动文件
             post["type"] = "archived"
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(frontmatter.dumps(post))
+            _atomic_write_text(file_path, frontmatter.dumps(post))
 
             # Use shutil.move for cross-filesystem safety
             # 使用 shutil.move 保证跨文件系统安全

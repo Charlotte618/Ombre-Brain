@@ -43,6 +43,7 @@
 - `breath(importance_min=8)` → 拉所有我标过 importance≥8 的核心事项，按重要度降序。
 - `breath(domain="work,relationship")` → 多领域过滤，逗号分隔。
 - `breath(tags="承诺")` → 标签 AND 过滤。`tags="feel"` 等价于 `domain="feel"`。
+- `breath(catalog=True)` → **目录模式（最省 token）**：每桶只回一行「名称|域|重要度」，不带正文、0 次 LLM 调用。上下文紧张 / token 预算敏感时，开新对话可先看目录定位，再 `breath(query=...)` 精准拉取需要的那几条。可配 `domain` 过滤。
 
 返回里**带 📌 的是我钉的核心准则**，会一直在那。带 ✨ 的是「第一次」类的桶。`[语义关联]` 是向量检索召回的旁证。
 
@@ -65,6 +66,8 @@
 
 短内容（< 30 字符）传给 `grow` 会自动走 `hold` 单条快速路径，不会强行拆。
 
+**已经拆好了？用 `grow(items=[...])` 逐字入库。** 如果我（有完整对话上下文的你）已经把长文拆成了几条最终正文，直接传 `items=["条1", "条2", ...]`（字符串列表）——每条正文**一字不动**存进去，系统只自动补元数据（领域/情感/标签/命名），合并到老桶也用原文追加、不再压缩。这样避免了「廉价模型把我的话重述一遍」的失真，拆分边界也由掌握全文的我来定，更合理。传了 `items` 就忽略 `content`。什么时候用：当我对拆分和表述有把握、且不希望正文被改写时（例如照抄她/他的原话）。
+
 #### `trace(bucket_id, ...)` — 我修正自己的记忆
 
 唯一的元数据写入入口。**只传你要改的字段**，`-1` / `""` 表示不动。
@@ -78,7 +81,7 @@
 | 我想让它彻底安静下去 | `trace(id, dont_surface=1)` — 不再出现在无参 breath，关键词搜还能找到 |
 | 我对当时的判断改主意了 | `trace(id, valence=0.7, arousal=0.4)` — 改情感坐标 |
 | 内容写错了 | `trace(id, content="新版本")` — 替换正文并重建 embedding |
-| 彻底删除 | `trace(id, delete=True)` — 不可恢复，连 embedding 一起清 |
+| 放入删除档案 | `trace(id, delete=True)` — 从日常召回中隐藏并清理 embedding；Markdown 仍保留在 `archive/` |
 | 改 plan 状态 | `trace(plan_id, status="resolved")` — 仅对 plan 桶 |
 | 调 plan 重量 | `trace(plan_id, weight=0.8)` |
 | 改/补「为什么记得」 | `trace(id, why_remembered="...")` |

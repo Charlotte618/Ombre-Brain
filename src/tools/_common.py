@@ -418,15 +418,14 @@ async def _merge_or_create_inner(
                 # 这样 dashboard 既能看到桶最初由谁创建，也能看到最近一次合并的来源。
                 if source_tool:
                     update_kwargs["last_merged_by"] = source_tool
-                await rt.bucket_mgr.update(bucket["id"], **update_kwargs)
+                await rt.bucket_mgr.update(
+                    bucket["id"],
+                    allow_embedding_fallback=(raw_merge and source_tool == "hold"),
+                    **update_kwargs,
+                )
                 # --- 旧 content 的脱水缓存失效，让 breath 拿到合并后的新文本 ---
                 try:
                     rt.dehydrator.invalidate_cache(bucket["content"])
-                except Exception:
-                    pass
-                # --- 合并后刷新 embedding（best-effort，合并路径不返回 embed 警告）---
-                try:
-                    await rt.embedding_engine.generate_and_store(bucket["id"], merged)
                 except Exception:
                     pass
                 rt.logger.info(
@@ -449,6 +448,8 @@ async def _merge_or_create_inner(
         why_remembered=why_remembered,
         source_tool=source_tool,
         grow_batch_id=grow_batch_id,
+        # hold 的铁律：正文优先落盘。打标/embedding 可降级，但绝不压缩或撤销记忆。
+        allow_embedding_fallback=(raw_merge and source_tool == "hold"),
     )
     # iter 2.1+ 起 create() 内部已调用 _sync_embedding，此处无需重复生成。
     # 只需从 embedding_engine 探测上次是否成功（检查 db 中是否有该 id）。

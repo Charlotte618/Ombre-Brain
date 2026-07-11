@@ -33,7 +33,6 @@ import hashlib
 import hmac
 import secrets
 import time
-import json as _json_lib
 from typing import Optional, Awaitable
 from starlette.requests import Request
 from starlette.responses import Response
@@ -53,7 +52,7 @@ from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, get_version, extract_wikilinks
+from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx, get_version, extract_wikilinks, parse_bool
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -335,6 +334,22 @@ mcp_extra = FastMCP(
 import web as _web
 import web._shared as _wsh
 _wsh.init(config)
+# 记忆持久性自检：容器里记忆目录若没挂持久卷，重建就全丢。开机就醒目告警，别让用户
+# 以为「存住了其实没有」。只提示不阻断（阻断会伤部署）。
+try:
+    _dp = _wsh.data_dir_persistence(config.get("buckets_dir", ""))
+    if not _dp["persistent"]:
+        logger.warning(
+            "=" * 60 + "\n"
+            "⚠️  记忆目录未挂载到持久卷：" + str(config.get("buckets_dir", "")) + "\n"
+            "    " + _dp["note"] + "\n"
+            "    （记忆比代码金贵：代码能重部署，记忆丢了找不回。请尽快修正挂载。）\n"
+            + "=" * 60
+        )
+    else:
+        logger.info(f"记忆目录持久性：{_dp['mode']} — {_dp['note']}")
+except Exception as _dpe:
+    logger.warning(f"数据目录持久性自检失败（不影响启动）：{_dpe}")
 # 注入业务引擎/版本/仓库根目录到 web 层（类比 tools/_runtime）。
 # 注意：embedding_engine 会被热重载替换 —— 待 embedding/config 路由迁到 web/ 时，
 # 替换处须同时写 _wsh.embedding_engine（目前这些路由仍在本文件、仍走 global）。
@@ -369,52 +384,19 @@ from web._shared import _mark_op  # noqa: F401  (injected into tools._runtime be
 
 
 # =============================================================
-# 仪表板硬删除通知队列（Dashboard Hard Purge Notification）
-# 她/他从仪表板彻底删除记忆后，下次 AI 调用任何工具时一次性通知。
-# 通知文件存于 buckets_dir/_pending_deletions.json，消费后立即删除。
-# AI 无法触发此通知（它不是 MCP 工具，只能由仪表板 HTTP 端点写入）。
+# 已退役的硬删除通知兼容钩子
+# web/_shared.py 仍保留这两个注入位，以免旧扩展导入时报错。
+# 当前版本不写入、不消费硬删除通知，也不抹除记忆。
 # =============================================================
 
-def _deletion_notice_path() -> str:
-    return os.path.join(config.get("buckets_dir", "buckets"), "_pending_deletions.json")
-
-
-def _write_deletion_notice(names: list) -> None:
-    """追加待发送删除通知。多次删除批次会合并入同一文件直至 AI 读取。"""
-    path = _deletion_notice_path()
-    try:
-        existing: list = []
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                existing = _json_lib.load(f)
-        existing.extend(names)
-        with open(path, "w", encoding="utf-8") as f:
-            _json_lib.dump(existing, f, ensure_ascii=False)
-    except Exception as e:
-        logger.warning(f"Failed to write deletion notice: {e}")
+def _write_deletion_notice(_names: list) -> None:
+    """兼容旧注入接口；物理删除能力已退役。"""
+    return None
 
 
 def _pop_deletion_notice() -> str:
-    """读取并消费通知文件。返回格式化通知字符串（含尾部换行），无通知返回空串。"""
-    path = _deletion_notice_path()
-    if not os.path.exists(path):
-        return ""
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            names = _json_lib.load(f)
-        os.remove(path)
-        if not names:
-            return ""
-        human = config.get("human", "人类")
-        ts = time.strftime("%Y-%m-%d %H:%M")
-        item_list = "\n".join(f"  · {n}" for n in names)
-        return (
-            f"「{ts}，{human} 通过前端界面永久删除了以下记忆：\n{item_list}\n"
-            f"如果其中有你想保留的，你可以告诉 {human}。」\n\n"
-        )
-    except Exception as e:
-        logger.warning(f"Failed to read deletion notice: {e}")
-        return ""
+    """兼容旧返回值；当前永远没有硬删除通知。"""
+    return ""
 
 
 # 这些 helper 定义在 server.py（读/写 webhook 全局等），但 web/ 的 hooks/buckets 路由要用。
@@ -562,19 +544,20 @@ async def breath(
     max_results: Optional[int] = 0,
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
+    catalog: Optional[bool] = False,
 ) -> str:
-    """检索并返回记忆桶。不传 query=返回权重最高的未解决记忆;传 query=按关键词+语义检索相关记忆。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。"""
+    """检索并返回记忆桶。不传 query=返回权重最高的未解决记忆;传 query=按关键词+语义检索相关记忆。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath(query=...) 精准拉取,可配 domain 过滤。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
             valence=valence, arousal=arousal, max_results=max_results,
-            importance_min=importance_min, tags=tags,
+            importance_min=importance_min, tags=tags, catalog=catalog,
         ),
         op="breath",
         args={
             "query": query, "max_tokens": max_tokens, "domain": domain,
             "valence": valence, "arousal": arousal, "max_results": max_results,
-            "importance_min": importance_min, "tags": tags,
+            "importance_min": importance_min, "tags": tags, "catalog": catalog,
         },
     )
 
@@ -591,7 +574,7 @@ async def hold(
     arousal: Optional[float] = -1,
     why_remembered: Optional[str] = "",
 ) -> str:
-    """存入一条记忆(一句话级)。系统自动打标并尝试与近似的已有桶合并。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 breath(domain=\"feel\") 读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。"""
+    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。存入一条一句话级记忆，content 必须保留原意和事实，不得先改写成摘要；OB 的 hold 路径也绝不会压缩正文。系统优先自动打标，API 不可用时使用本地中性元数据继续逐字保存。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 feel 检索读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, tags=tags, importance=importance,
@@ -609,12 +592,14 @@ async def hold(
 
 
 @mcp.tool()
-async def grow(content: str) -> str:
-    """整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。"""
+async def grow(content: str = "", items: Optional[list] = None) -> str:
+    """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
+
+    进阶(可选):若你(上层 AI)已经把长文拆成了 N 条最终正文,传 items=[条1, 条2, ...](字符串列表)即可**逐字入库**——跳过系统的二次拆分与改写,每条正文一字不动,只自动补元数据(领域/情感/标签/命名);合并到老桶也用原文追加、不再压缩。你有完整对话上下文,拆分和表述质量比只看二手长文的内部模型更高,能避免反复压缩带来的失真。传了 items 就忽略 content;不传则按上面的默认行为整段整理。"""
     return await _with_notice(
-        _t_grow.dispatch(content),
+        _t_grow.dispatch(content, items=items),
         op="grow",
-        args={"content_len": len(content or "")},
+        args={"content_len": len(content or ""), "items": len(items or [])},
     )
 
 
@@ -637,7 +622,7 @@ async def trace(
     dont_surface: Optional[int] = -1,
     why_remembered: Optional[str] = "",
 ) -> str:
-    """修改某条记忆的元数据或内容。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并重建 embedding;delete=True=彻底删除(不可恢复);status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。只传需要修改的字段,-1 或空串表示不改。"""
+    """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并重建 embedding;delete=True=移入 archive 并标记 deleted_at（只是归档，Markdown 文件不会被物理删除）;status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
@@ -961,7 +946,9 @@ if __name__ == "__main__":
         # config.yaml: mcp_require_auth: false → 完全跳过 OAuth 检查，
         # 任何客户端（GPT / GLM / 自定义前端）可免认证直连 /mcp。
         # 不填或 true → 保持默认：必须 OAuth Bearer token。
-        _mcp_auth_required = bool(config.get("mcp_require_auth", True))
+        _mcp_auth_required = parse_bool(
+            config.get("mcp_require_auth", True), default=True
+        )
 
         class _MCPAuthMiddleware:
             def __init__(self, app):
@@ -973,10 +960,22 @@ if __name__ == "__main__":
                     if path.startswith("/mcp"):
                         headers = {k.lower(): v for k, v in scope.get("headers", [])}
                         auth = headers.get(b"authorization", b"").decode("latin-1")
-                        if not (auth.startswith("Bearer ") and _is_valid_mcp_token(auth[7:])):
-                            # Build public base URL from ASGI scope headers
-                            proto = headers.get(b"x-forwarded-proto", b"").decode() or scope.get("scheme", "http")
-                            host = (headers.get(b"x-forwarded-host") or headers.get(b"host", b"")).decode()
+                        # Build the externally visible canonical resource. Proxy headers can
+                        # contain comma-separated chains; the first value is the client-facing one.
+                        proto = (
+                            headers.get(b"x-forwarded-proto", b"").decode().split(",", 1)[0].strip()
+                            or scope.get("scheme", "http")
+                        )
+                        host = (
+                            (headers.get(b"x-forwarded-host") or headers.get(b"host", b""))
+                            .decode().split(",", 1)[0].strip()
+                        )
+                        base = f"{proto}://{host}"
+                        resource = f"{base}{path.rstrip('/')}"
+                        if not (
+                            auth.startswith("Bearer ")
+                            and _is_valid_mcp_token(auth[7:], resource=resource)
+                        ):
                             base = f"{proto}://{host}"
                             # 让 resource_metadata 指向「本次请求 endpoint」对应的 metadata，
                             # 使 metadata.resource 与实际连接的 /mcp 路径严格匹配（RFC 9728）。
@@ -986,7 +985,7 @@ if __name__ == "__main__":
                             meta_url = f"{base}/.well-known/oauth-protected-resource/{endpoint}"
                             ww_auth = (
                                 f'Bearer realm="Ombre Brain",'
-                                f' resource_metadata="{meta_url}"'
+                                f' resource_metadata="{meta_url}", scope="mcp"'
                             )
                             body = _json_mw.dumps({
                                 "error": "Unauthorized",
@@ -1037,7 +1036,27 @@ if __name__ == "__main__":
         if _mcp_auth_required:
             logger.info("MCP OAuth middleware enabled / MCP OAuth 中间件已启用")
         else:
-            logger.info("MCP auth disabled (mcp_require_auth: false) — open access / MCP 认证已关闭，所有客户端可直连")
+            # 安全加固 #7：关掉鉴权 = /mcp 全裸奔，任何能连到端口的人都能读写全部记忆。
+            # 从 info 升级为显著 WARNING，避免用户无意识地把大脑暴露到公网。
+            logger.warning(
+                "=" * 60 + "\n"
+                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
+                "    12 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    本服务监听 0.0.0.0，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
+                "    或仅绑定 127.0.0.1 保护；仅在可信内网/本机自有前端场景才建议关闭鉴权。\n"
+                + "=" * 60
+            )
+        # 端口口径澄清（用户反馈：Docker 与裸机端口容易混淆）。容器内固定监听 8000，
+        # 对外端口由 host 映射（如 18001:8000）决定，改 host_port 不影响容器内监听；
+        # 裸机则直接监听本端口（默认 18001）。
+        if _wsh.in_docker():
+            logger.info(
+                f"Listening on :{OMBRE_PORT} INSIDE the container. "
+                f"外部访问端口由 host 映射决定（compose 里的 18001:{OMBRE_PORT}），"
+                f"改前端 host_port 不影响容器内监听。"
+            )
+        else:
+            logger.info(f"Listening on :{OMBRE_PORT} (bare-metal / 裸机默认 18001)")
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
     else:
         # stdio：工具已在启动入口处统一回灌进 mcp（12 个全暴露），这里直接跑。

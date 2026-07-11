@@ -2,6 +2,72 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.5.3
+
+### 修复 / Fixed
+
+- 统一解析带 `Z` / UTC offset 的时间字段，避免新导入记忆被误判为旧记忆并异常衰减。
+- 修正字符串 `"false"` 在 OAuth、embedding、记忆状态和 LLM 结构化结果中被误当作开启的问题。
+- 移除普通写入、导入和编辑路径的重复 embedding 请求，统一由 `BucketManager` 维护向量。
+- embedding 热重载会同步更新 Web、MCP、桶管理、导入和完整迁移运行时，避免新旧模型并存。
+- 同步两份 Dashboard，并修正 Docker 宿主机挂载提示和动态调试 ID 的安全传递。
+
+### 测试 / Tests
+
+- 新增时间、布尔边界、embedding 单次写入、热重载引用和 Dashboard 一致性回归测试。
+- 使用隔离的真实本地服务验证 Dashboard、12 个 MCP 工具、`hold` 落盘、`breath` 读回及 `pulse`。
+- 完整测试通过：623 passed，7 skipped。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.5.3。
+
+## 2.5.2
+
+### 修复 / Fixed
+
+- MCP OAuth 补齐 resource binding、反向代理公网地址规范化、PKCE 与 token 续期边界，避免授权页已弹出却无法完成连接。
+- `hold` 在打标或 embedding API 不可用时仍原样保存正文；合并只追加原文，绝不调用 LLM 压缩。
+- 脱水缓存键加入 API 格式、端点和模型；切换到 Haiku 等新模型后，长桶下次首次浮现会真正调用新模型，不复用旧模型摘要。
+- 移除 Dashboard 物理删除入口；旧 `/api/buckets/purge` 改为只读拒绝端点，保留 API 兼容但不会抹除记忆。
+
+### 优化 / Improved
+
+- 收紧 `hold` / `grow` / `trace` 工具描述，要求客户端只在有明确记忆意图时发起写操作，降低模型过度调用。
+
+### 测试 / Tests
+
+- 新增 OAuth 授权码 + PKCE + resource + refresh token 端到端回归，并以真实本地 HTTP 服务验证 401 discovery 链。
+- 新增 `hold` 打标/向量降级、原文合并、模型级脱水缓存、OAuth 开关持久化和 purge 禁用回归。
+- 完整测试通过：613 passed，7 skipped。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.5.2。
+
+## 2.5.1
+
+### 修复 / Fixed
+
+- Cloudflare Tunnel 在 Compose 部署下默认使用双 `v2` region edge 和 HTTP/2，绕过部分 VPN DNS
+  无法解析 `_v2-origintunneld._tcp.argotunnel.com` SRV 记录导致的启动失败。
+- 单实例 Compose 统一通过 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到
+  `/app/buckets`，并改用兼容 Windows 盘符的长语法；记忆、`config.yaml` 和 Tunnel token
+  在 `--force-recreate` 后继续保留。
+- 多实例 Compose 支持为每个 owner 单独设置宿主机持久目录，同时保留数据隔离。
+- Dashboard 在 Docker 内不再把容器自己的 `.env` 误报为宿主机挂载配置；宿主机目录改为
+  Compose 只读状态，并明确提示修改 compose 同目录 `.env` 后重建容器。
+- 修正文档和环境变量示例中遗留的 `/data` 路径，统一为 `/app/buckets`。
+
+### 测试 / Tests
+
+- 新增 Compose Tunnel/DNS、Windows bind mount、owner 隔离和 Tunnel token 持久化回归测试。
+- 完整测试通过：602 passed，7 skipped。
+
+### 维护 / Chores
+
+- VERSION + `src/VERSION` -> 2.5.1。
+
 ## 2.4.13
 
 ### 修复 / Fixed

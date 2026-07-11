@@ -11,9 +11,7 @@ permanent 目录，不衰减、不会被合并掉。
 - 仍然走 LLM analyze 拿 domain/valence/arousal/tags/suggested_name；
   她/他显式传入的 valence/arousal 优先
 - type="permanent" + pinned=True 双重标记
-- embedding 由 create() 内置 _sync_embedding 落盘时同步生成（与普通桶一致）；
-  create() 内部已做强制前置校验，embedding 不可用时直接抛异常、拒绝创建，
-  不再支持「仅关键词匹配」的降级状态；成功时返回 📌钉选→<id>
+- embedding 由 create() 尝试同步生成；不可用时仍保留逐字原文，稍后可 backfill
 
 不做什么（边界）：
 - 不做合并尝试：pinned 桶之间互不合并，分别保留
@@ -59,9 +57,6 @@ async def store_pinned(
     if err:
         return err
 
-    # create() 内部 _require_embedding_available() 会在写文件前硬性校验，
-    # embedding 不可用直接抛 RuntimeError，不创建任何桶——交由 tools/hold/__init__.py
-    # 的统一异常处理转成面向用户的报错文本（OB-E004），不在这里捕获降级。
     bucket_id = await rt.bucket_mgr.create(
         content=content,
         tags=all_tags,
@@ -73,5 +68,7 @@ async def store_pinned(
         bucket_type="permanent",
         pinned=True,
         why_remembered=why_remembered,
+        source_tool="hold",
+        allow_embedding_fallback=True,
     )
     return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"

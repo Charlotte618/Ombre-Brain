@@ -3,8 +3,9 @@
 web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 ========================================
 
-仪表板「记忆」页的后端：列表/详情、pin/resolve/archive/forget、批量遗忘、彻底清除
-（写删除通知队列）、采样与 human 名设置（持久化 config.yaml）、锚点、/api/self。
+仪表板「记忆」页的后端：列表/详情、pin/resolve/archive/forget、批量遗忘、
+采样与 human 名设置（持久化 config.yaml）、锚点、/api/self。
+应用层只允许归档/淡忘，不提供物理删除记忆桶的能力。
 
 对外暴露：register(mcp)。
 ========================================
@@ -23,9 +24,9 @@ from . import _shared as sh
 logger = sh.logger
 
 try:
-    from utils import strip_wikilinks  # type: ignore
+    from utils import strip_wikilinks, parse_bool  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks  # type: ignore
+    from ..utils import strip_wikilinks, parse_bool  # type: ignore
 
 try:
     from tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
@@ -291,7 +292,10 @@ def register(mcp) -> None:
             return JSONResponse({"error": "ids must be a non-empty list"}, status_code=400)
         if "dont_surface" not in body:
             return JSONResponse({"error": "dont_surface (bool) required"}, status_code=400)
-        target = bool(body["dont_surface"])
+        try:
+            target = parse_bool(body["dont_surface"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         ok_ids, missing_ids, errors = [], [], []
         for bid in ids:
             try:
@@ -327,7 +331,7 @@ def register(mcp) -> None:
         sampling = surfacing.setdefault("sampling", {})
         if request.method == "GET":
             return JSONResponse({
-                "enabled": bool(sampling.get("enabled", False)),
+                "enabled": parse_bool(sampling.get("enabled", False), default=False),
                 "top_k": int(sampling.get("top_k") or 5),
                 "sample_k": int(sampling.get("sample_k") or 2),
                 "temperature": float(sampling.get("temperature") or 0.7),
@@ -339,7 +343,7 @@ def register(mcp) -> None:
         # Validate ranges; reject silently-corrupt inputs at the boundary
         try:
             if "enabled" in body:
-                sampling["enabled"] = bool(body["enabled"])
+                sampling["enabled"] = parse_bool(body["enabled"])
             if "top_k" in body:
                 tk = int(body["top_k"])
                 if not (1 <= tk <= 50):
@@ -515,7 +519,9 @@ def register(mcp) -> None:
         try:
             body = await request.json()
             if "value" in body:
-                target = bool(body["value"])
+                target = parse_bool(body["value"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         except Exception:
             pass  # no body → toggle
         if target is None:
@@ -549,64 +555,19 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/buckets/purge", methods=["POST"])
     async def api_buckets_purge(request: Request) -> Response:
-        """Dashboard-only hard purge: physically removes files and generates an AI notification.
-
-        Only callable from the dashboard (requires X-Purge-Confirm header).
-        Not exposed as an MCP tool — the AI cannot trigger this.
-        After purge, _pending_deletions.json is written; the next tool call
-        sends a one-time notice to the AI about what was deleted.
-        """
+        """Retired hard-purge endpoint: memory may be archived, never physically erased."""
         from starlette.responses import JSONResponse
-        import frontmatter as _fm
         err = sh._require_auth(request)
         if err:
             return err
-        # Extra safeguard header — prevents automated/tool-based calls
-        if request.headers.get("X-Purge-Confirm") != "dashboard-purge-v1":
-            return JSONResponse({"error": "missing or invalid X-Purge-Confirm header"}, status_code=403)
-        try:
-            body = await request.json()
-        except Exception:
-            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        ids = body.get("ids", [])
-        if not ids or not isinstance(ids, list):
-            return JSONResponse({"error": "ids must be a non-empty list"}, status_code=400)
-        if len(ids) > 200:
-            return JSONResponse({"error": "too many ids (max 200 per request)"}, status_code=400)
-
-        deleted_names: list = []
-        failed: list = []
-        for bid in ids:
-            if not isinstance(bid, str) or not bid.strip():
-                continue
-            bid = bid.strip()
-            file_path = sh.bucket_mgr._find_bucket_file(bid)
-            if not file_path:
-                failed.append(bid)
-                continue
-            # Read display name before deletion
-            try:
-                post = _fm.load(file_path)
-                name = str(post.get("name") or bid)
-            except Exception:
-                name = bid
-            try:
-                os.remove(file_path)
-                if sh.embedding_engine:
-                    try:
-                        sh.embedding_engine.delete_embedding(bid)
-                    except Exception:
-                        pass
-                deleted_names.append(name)
-                logger.info(f"[PURGE] hard-deleted bucket: {bid} ({name})")
-            except OSError as e:
-                logger.error(f"[PURGE] failed to delete {bid}: {e}")
-                failed.append(bid)
-
-        if deleted_names:
-            sh.write_deletion_notice(deleted_names)
-
-        return JSONResponse({"ok": True, "deleted": len(deleted_names), "failed": failed})
+        return JSONResponse({
+            "error": "physical_deletion_forbidden",
+            "message": (
+                "Ombre Brain 不提供物理删除记忆桶的能力。请使用归档或主动遗忘；"
+                "Markdown 文件会继续保留。"
+            ),
+            "philosophy": "记忆会被遗忘，但绝不能被抹去。",
+        }, status_code=410)
 
 
     # ---- letter REST endpoints (iter 1.4) ------------------------

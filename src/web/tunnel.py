@@ -28,6 +28,11 @@ from starlette.responses import Response
 
 from . import _shared as sh
 
+try:
+    from utils import parse_bool  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..utils import parse_bool  # type: ignore
+
 _tunnel_proc: Optional[_subprocess.Popen] = None
 _tunnel_last_error: str = ""  # last captured stderr lines from cloudflared
 
@@ -68,7 +73,8 @@ def _start_tunnel(token: str) -> tuple[bool, str]:
         return True, "already running"
     cf = shutil.which("cloudflared")
     if not cf:
-        return False, "cloudflared 未安装，请在 Dockerfile 中添加或手动安装"
+        return False, ("cloudflared 未安装（镜像可能以 --build-arg INSTALL_CLOUDFLARED=0 构建）。"
+                       "重新构建时去掉该参数，或手动安装 cloudflared 后再用隧道管理。")
     try:
         _tunnel_last_error = ""
         _tunnel_proc = _subprocess.Popen(
@@ -136,7 +142,10 @@ def register(mcp) -> None:
         except Exception:
             return JSONResponse({"error": "invalid JSON"}, status_code=400)
         token = body.get("token", "").strip()
-        auto_start = bool(body.get("auto_start", False))
+        try:
+            auto_start = parse_bool(body.get("auto_start", False))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
         cfg = _load_tunnel_config()
         if token:
             cfg["token"] = token
