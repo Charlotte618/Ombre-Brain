@@ -849,12 +849,15 @@ if __name__ == "__main__":
 
         # --- Application-level keepalive: ping /health every 60s ---
         # --- 应用层保活：每 60 秒 ping 一次 /health，防止 Cloudflare Tunnel 空闲断连 ---
+        # 用 127.0.0.1 而非 localhost：uvicorn 绑的是 0.0.0.0（仅 IPv4）。在 Proot / Termux
+        # 等环境里 localhost 常先解析到 IPv6 ::1，连不上 IPv4-only 的监听 → 保活每分钟报一次
+        # warning、日志噪声很大（且掩盖真正的连接问题）。显式走 127.0.0.1 稳定命中本机 IPv4。
         async def _keepalive_loop() -> None:
             await asyncio.sleep(10)  # Wait for server to fully start
             async with httpx.AsyncClient() as client:
                 while True:
                     try:
-                        await client.get(f"http://localhost:{OMBRE_PORT}/health", timeout=_HEALTH_PROBE_TIMEOUT_SECONDS)
+                        await client.get(f"http://127.0.0.1:{OMBRE_PORT}/health", timeout=_HEALTH_PROBE_TIMEOUT_SECONDS)
                         logger.debug("Keepalive ping OK / 保活 ping 成功")
                     except Exception as e:
                         logger.warning(f"Keepalive ping failed / 保活 ping 失败: {e}")
@@ -1069,6 +1072,16 @@ if __name__ == "__main__":
             )
         else:
             logger.info(f"Listening on :{OMBRE_PORT} (bare-metal / 裸机默认 18001)")
+        # 明确打印「客户端该怎么连」——给 Operit / 安卓 / 自建前端等非技术用户排障用。
+        # 一眼能看清 endpoint 路径、鉴权开关；本机桥接务必用 127.0.0.1（见上方保活注释）。
+        logger.info(
+            "MCP endpoint ready | transport=%s | 本机连接 URL: http://127.0.0.1:%s/mcp "
+            "（远程走你的域名/隧道，末尾同样是 /mcp）| 鉴权: %s",
+            transport,
+            OMBRE_PORT,
+            "开启(需 OAuth Bearer)" if _mcp_auth_required
+            else "关闭(免 token 直连，仅限可信内网/本机)",
+        )
         uvicorn.run(_app, host="0.0.0.0", port=OMBRE_PORT)
     else:
         # stdio：工具已在启动入口处统一回灌进 mcp（12 个全暴露），这里直接跑。

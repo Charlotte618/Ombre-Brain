@@ -934,11 +934,17 @@ class BucketManager:
         bucket_id: str,
         *,
         allow_embedding_fallback: bool = False,
+        bump_active: bool = False,
         **kwargs,
     ) -> bool:
         """
         Update bucket content or metadata fields.
         更新桶的内容或元数据字段。
+
+        bump_active=False（默认）：纯元数据/内容编辑（trace、plan、anchor、后台
+        自动 resolve、导入等）——**不**刷新 last_active，也不动 activation_count。
+        bump_active=True：把这次写入视作一次真实激活（如 hold/grow 合并近邻桶），
+        同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
         """
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
@@ -1059,14 +1065,30 @@ class BucketManager:
                     else:
                         post[k] = kwargs[k]
 
-        # --- Auto-refresh activation time / 自动刷新激活时间 ---
-        post["last_active"] = now_iso()
+        # --- 激活时间 / 激活次数 ---
+        # last_active 只代表「最后一次真实激活/召回」，并作为衰减 recency 打分的输入。
+        # 元数据编辑（trace / plan / anchor / 后台自动 resolve 等）**不算「活跃」**：
+        # 若在此无条件刷新，会重置遗忘时效，还会让 activation_count 与 last_active
+        # 长期不一致（次数不涨、时间却变新）。只有真正的「新事件写入」才把这条记忆
+        # 当作被重新激活一次——由 bump_active=True 显式触发（如 hold/grow 合并近邻桶），
+        # 同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
+        if bump_active:
+            post["last_active"] = now_iso()
+            post["activation_count"] = int(post.get("activation_count") or 0) + 1
 
         try:
             _atomic_write_text(file_path, frontmatter.dumps(post))
         except OSError as e:
             logger.error(f"Failed to write bucket update / 写入桶更新失败: {file_path}: {e}")
             return False
+
+        if bump_active:
+            self._cache_bump(
+                bucket_id,
+                last_active=post["last_active"],
+                activation_count=post["activation_count"],
+                file_path=file_path,
+            )
 
         # --- Auto-move: pinned → permanent/ ---
         # --- 自动移动：钉选 → permanent/ ---
@@ -1355,6 +1377,20 @@ class BucketManager:
 
         if not all_buckets:
             return []
+
+        # --- Layer 0: bucket-id 直达通道（纯定位，短路）---
+        # bucket id 是随机 hex、**没有语义**，不该进向量/BM25/模糊通道（塞进去只会
+        # 污染语义空间）。这里独立做「完整 id 精确匹配」：查询串正好等于某个可见桶的
+        # 完整 id → 直接返回该桶（满分），绕开语义排序。「我知道要哪条」的精确定位。
+        # 只认完整 id（不做前缀匹配），避免普通关键词误触；软删除/归档桶不在 all_buckets
+        # 中，故按 id 也搜不到已删除桶，与 get() 的可见性一致。
+        q_exact = query.strip()
+        if q_exact:
+            for b in all_buckets:
+                if str(b.get("id")) == q_exact:
+                    hit = dict(b)
+                    hit["score"] = 1.0
+                    return [hit]
 
         # --- Layer 1: domain pre-filter (fast scope reduction) ---
         # --- 第一层：主题域预筛（快速缩小范围）---

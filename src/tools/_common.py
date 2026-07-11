@@ -421,6 +421,10 @@ async def _merge_or_create_inner(
                 await rt.bucket_mgr.update(
                     bucket["id"],
                     allow_embedding_fallback=(raw_merge and source_tool == "hold"),
+                    # 合并 = 写入了一件新的当下事件 → 视作一次真实激活，
+                    # 刷新 last_active 并累加 activation_count（否则合并后的记忆
+                    # 时间会停在旧桶创建时刻，反而更失真）。
+                    bump_active=True,
                     **update_kwargs,
                 )
                 # --- 旧 content 的脱水缓存失效，让 breath 拿到合并后的新文本 ---

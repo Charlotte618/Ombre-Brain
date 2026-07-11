@@ -441,13 +441,29 @@ class TestBucketManagerUpdate:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_update_refreshes_last_active(self, bucket_mgr):
+    async def test_metadata_update_does_not_refresh_last_active(self, bucket_mgr):
+        """纯元数据编辑（trace 等）不算「激活」：不刷 last_active、不动 activation_count。"""
         bid = await bucket_mgr.create(content="x")
-        before = datetime.now().replace(microsecond=0)
+        before = (await bucket_mgr.get(bid))["metadata"]
+        before_active = before["last_active"]
+        before_count = float(before.get("activation_count") or 0)
         await bucket_mgr.update(bid, importance=6)
-        result = await bucket_mgr.get(bid)
-        last_active = datetime.fromisoformat(result["metadata"]["last_active"])
-        assert last_active >= before
+        after = (await bucket_mgr.get(bid))["metadata"]
+        assert after["last_active"] == before_active
+        assert float(after.get("activation_count") or 0) == before_count
+
+    @pytest.mark.asyncio
+    async def test_bump_active_update_refreshes_activation(self, bucket_mgr):
+        """真实激活写入（如合并近邻桶）：bump_active=True 刷 last_active 且 activation_count +1。"""
+        import time
+        bid = await bucket_mgr.create(content="x")
+        before = (await bucket_mgr.get(bid))["metadata"]
+        before_count = float(before.get("activation_count") or 0)
+        time.sleep(1)  # 保证秒级时间戳能前移
+        await bucket_mgr.update(bid, importance=6, bump_active=True)
+        after = (await bucket_mgr.get(bid))["metadata"]
+        assert float(after.get("activation_count") or 0) == before_count + 1
+        assert after["last_active"] >= before["last_active"]
 
     @pytest.mark.asyncio
     async def test_update_valence_clamped(self, bucket_mgr):

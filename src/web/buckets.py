@@ -133,7 +133,7 @@ def register(mcp) -> None:
                     "digested": meta.get("digested", False),
                     "created": meta.get("created", ""),
                     "last_active": meta.get("last_active", ""),
-                    "activation_count": meta.get("activation_count", 1),
+                    "activation_count": meta.get("activation_count", 0),
                     "score": sh.decay_engine.calculate_score(meta),
                     "content_preview": strip_wikilinks(b.get("content", ""))[:200],
                     # iter 1.8 新增字段（后台老桶读出默认值）

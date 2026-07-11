@@ -33,8 +33,16 @@ RUN if [ "$INSTALL_CLOUDFLARED" = "1" ]; then \
 
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）
+# 可选 pip 镜像源：受限网络（宿主代理掐断 PyPI）时传
+#   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple --build-arg PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+# 默认留空 → 官方 PyPI，行为不变。
+ARG PIP_INDEX_URL=""
+ARG PIP_TRUSTED_HOST=""
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --retries 10 --timeout 120 \
+        ${PIP_INDEX_URL:+-i "$PIP_INDEX_URL"} \
+        ${PIP_TRUSTED_HOST:+--trusted-host "$PIP_TRUSTED_HOST"} \
+        -r requirements.txt
 
 # Copy project files / 复制项目文件
 COPY src/ ./src/

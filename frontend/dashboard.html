@@ -1765,7 +1765,7 @@
     </span>
   </div>
   <div class="search-bar">
-    <input type="text" id="search-input" placeholder="搜索记忆…" onkeydown="if(event.key==='Enter')doSearch()" />
+    <input type="text" id="search-input" placeholder="搜索记忆… / 粘贴完整 bucket id 精确定位" onkeydown="if(event.key==='Enter')doSearch()" />
     <button onclick="doSearch()" title="搜索"><i data-lucide="search"></i></button>
   </div>
   <div class="header-actions">
@@ -2772,6 +2772,23 @@
         </div>
         <div style="margin-top:6px;font-size:11px;color:var(--text-light);">12 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
         <div id="mcp-copy-msg" style="margin-top:4px;font-size:11px;color:var(--positive);min-height:16px;"></div>
+      </div>
+
+      <!-- 传输模式（MCP Transport）热切换 -->
+      <div style="margin:18px 0;padding:14px;background:var(--surface-solid);border-radius:11px;box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),inset -2px -2px 4px var(--shadow-light);">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">传输模式 · MCP Transport</div>
+        <div id="transport-btns" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button type="button" class="transport-btn" data-transport="streamable-http" onclick="switchTransport('streamable-http')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Streamable HTTP</button>
+          <button type="button" class="transport-btn" data-transport="sse" onclick="switchTransport('sse')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Legacy SSE</button>
+          <button type="button" class="transport-btn" data-transport="stdio" onclick="switchTransport('stdio')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">stdio</button>
+          <span id="transport-msg" style="margin-left:6px;font-size:11px;"></span>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text-light);line-height:1.7;">
+          切换会写入 config.yaml + .env 并<b>自动重启服务</b>（约 10-30 秒）后生效。
+          <b>Streamable HTTP</b>：Claude.ai 网页版 / Claude Code 远程（推荐默认）。
+          <b>Legacy SSE</b>：旧版 SSE 客户端兼容。
+          <b style="color:var(--negative);">stdio</b>：⚠️ 仅本地 stdin/stdout MCP，切换后 <b>Dashboard 与所有 HTTP 服务会消失，且无法再从网页切回</b>（需在服务器改 config.yaml / 环境变量恢复）。
+        </div>
       </div>
 
       <!-- OAuth 鉴权开关 -->
@@ -4105,7 +4122,7 @@ async function showDetail(id) {
         '<div class="field"><label>模型视角</label>' + (meta.model_valence != null ? 'V' + meta.model_valence.toFixed(2) : '—') + '</div>' +
         '<div class="field"><label>重要度</label>' + (meta.importance || 5) + '/10</div>' +
         '<div class="field"><label>权重分</label>' + (b.score != null ? b.score.toFixed(4) : '—') + '</div>' +
-        '<div class="field"><label>激活次数</label>' + (meta.activation_count || 1) + '</div>' +
+        '<div class="field"><label>激活次数</label>' + (meta.activation_count != null ? meta.activation_count : 0) + '</div>' +
         '<div class="field"><label>已解决</label>' + (meta.resolved ? _SV.ok : '—') + '</div>' +
         '<div class="field"><label>已消化</label>' + (meta.digested ? _SV.ok : '—') + '</div>' +
         '<div class="field"><label>钉选</label>' + (meta.pinned ? _SV.ok : '—') + '</div>' +
@@ -6065,6 +6082,7 @@ async function loadConfig() {
       'Transport: <strong>' + cfg.transport + '</strong><br>数据目录: <strong>' + cfg.buckets_dir + '</strong>'
       + '<br>运行环境: <strong>' + (cfg.in_docker ? 'Docker 容器' : '裸机') + '</strong>'
       + '<br>对外端口: <strong>' + (cfg.host_port || '18001（默认）') + '</strong>';
+    if (cfg.transport) highlightTransport(cfg.transport);
   } catch (e) {
     document.getElementById('config-status').innerHTML =
       '<span style="color:var(--negative)">加载失败: ' + e.message + '</span>';
@@ -7260,6 +7278,61 @@ async function saveMcpAuth() {
   } catch (e) {
     msg.style.color = 'var(--negative)';
     msg.textContent = '请求失败: ' + e.message;
+  }
+}
+
+function highlightTransport(t) {
+  document.querySelectorAll('#transport-btns .transport-btn').forEach(function(b) {
+    var on = b.dataset.transport === t;
+    b.style.background = on ? 'var(--accent)' : 'none';
+    b.style.color = on ? '#fff' : 'var(--text)';
+    b.style.fontWeight = on ? '600' : '400';
+    b.style.borderColor = on ? 'var(--accent)' : 'var(--border)';
+  });
+}
+
+async function switchTransport(t) {
+  var msg = document.getElementById('transport-msg');
+  var warn;
+  if (t === 'stdio') {
+    warn = '⚠️ 切换到 stdio 会关闭 Web Dashboard 和所有 HTTP 服务，\n'
+         + '并且你将无法再从网页切回（需在服务器改 config.yaml / 环境变量恢复）。\n\n确定继续吗？';
+  } else {
+    warn = '切换到 ' + t + ' 会自动重启服务（约 10-30 秒）。确定继续吗？';
+  }
+  if (!confirm(warn)) return;
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = '正在切换并重启…';
+  try {
+    var res = await authFetch('/api/transport', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transport: t }),
+    });
+    if (!res) return;
+    var r = await res.json();
+    if (r.ok) {
+      if (r.restarting === false) {
+        msg.style.color = 'var(--positive)';
+        msg.textContent = r.note || '传输模式未变化';
+        return;
+      }
+      highlightTransport(t);
+      if (t === 'stdio') {
+        msg.style.color = 'var(--negative)';
+        msg.textContent = '已切到 stdio，HTTP 服务即将关闭，本页面将失联。';
+      } else {
+        msg.style.color = 'var(--positive)';
+        msg.textContent = '已切到 ' + t + '，服务重启中（约 10-30 秒），稍后刷新页面。';
+      }
+    } else {
+      msg.style.color = 'var(--negative)';
+      msg.textContent = r.error || '切换失败';
+    }
+  } catch (e) {
+    // 自重启会掐断本次连接，fetch 抛错是预期的
+    msg.style.color = 'var(--text-dim)';
+    msg.textContent = '请求已发出，服务重启中，稍后刷新页面。';
   }
 }
 

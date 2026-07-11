@@ -341,6 +341,26 @@ mcp_require_auth: false
 
 ---
 
+### Operit / 安卓 / Proot 本地桥接（连接器一直黄灯）
+
+适合：在手机上用 **Operit** 等本地 MCP 客户端，通过 **Termux / Proot** 跑 Ombre Brain，客户端灯常亮黄、连不上 `/mcp`。
+
+先说结论：**streamable-http 传输本身在 Proot 下没有已知的不兼容**——它就是普通的 HTTP + SSE，Proot 对回环 HTTP 是透明的。能用 bash 存进记忆，说明 Python、依赖、磁盘、端口都是好的；黄灯几乎都卡在 `/mcp` 的**握手环节**。按下面三步逐个对齐，基本能覆盖：
+
+1. **transport 必须是 `streamable-http`**
+   默认是 `stdio`——**stdio 根本不开 HTTP 服务**，本地桥自然连不上。config.yaml 里写 `transport: streamable-http`，或设环境变量 `OMBRE_TRANSPORT=streamable-http`，然后重启。
+   （已放宽：写成 `http` / `streamable_http` 等常见变体也会被自动归一成 `streamable-http`，但推荐写规范值。）
+
+2. **本地桥接把鉴权关掉**
+   默认 `/mcp` 强制 OAuth 2.1，Operit 这类客户端不走该流程，会在 401 处卡成「半连接」（正是黄灯）。设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）重启即可。本机/可信内网桥接可放心关；同机回环连接本就不经过公网。
+
+3. **客户端 URL 用 `127.0.0.1`，不要用 `localhost`**
+   服务监听 `0.0.0.0`（仅 IPv4）。Proot / Termux 里 `localhost` 常先解析到 IPv6 `::1`，连不上 IPv4 监听。Operit 里填 **`http://127.0.0.1:<端口>/mcp`**，注意末尾必须是 `/mcp`，端口对上你的实际监听端口。
+
+对齐后仍黄灯，就看服务端 `server.log`：启动时会打印一行 `MCP endpoint ready | transport=... | 鉴权: ...`，据此确认传输和鉴权是否如预期；再看黄灯那一刻有没有 `/mcp` 的请求进来、是不是 `401`。
+
+---
+
 ## 从源码部署 / Deploy from Source
 
 适合想自己改代码或部署到 VPS 的用户。
@@ -679,6 +699,7 @@ docker compose -f deploy/docker-compose.yml up -d
 | embedding / 摘要 API 暂时离线时 `breath(query=...)` 出现“检索降级” | OB 正在使用关键词/BM25 和最多 300 字原文片段继续读取，不是记忆丢失 | 可继续使用；到系统诊断查看向量队列，恢复 API 后语义通道会自动回来 |
 | 向量化不生效 / 语义检索没结果（压缩却正常） | base_url 漏 `/v1`（→404）、model 漏 `BAAI/` 前缀（→Model does not exist），或后台队列因网络 / 配额持续重试 | 用 Dashboard 向量化区的「测试」和系统诊断查看待处理 / 重试数；按上面「用硅基流动…」一节填对 base_url 与 model；错误详情见设置页错误面板（OB-E001） |
 | 自有前端 / GPT / GLM 调用 MCP 工具被 401 卡住 | 默认强制 OAuth，自定义客户端不走该流程 | 设 `OMBRE_MCP_REQUIRE_AUTH=false`（或 `config.yaml: mcp_require_auth: false`）后重启；详见「方式三：接入自有前端」 |
+| **Operit / 安卓 / Proot 本地桥接一直黄灯、连不上 `/mcp`** | 多为下面三点之一：① `transport` 没设成 `streamable-http`（默认 `stdio` **根本不开 HTTP 服务**）；② 默认强制 OAuth，Operit 这类本地桥不走该流程被 401 卡半通；③ 客户端填了 `localhost`，在 Proot/Termux 里常解析成 IPv6 `::1`，连不上 IPv4 监听 | 见下方「**Operit / 安卓 / Proot 本地桥接**」一节，三步逐个对齐 |
 | Token 过期后无法自动重连 | 旧版本不支持 `refresh_token` grant，headless 环境只能重新打开授权页 | 更新到 v2.4.11+ 后重新授权一次，之后客户端可用 refresh token 自动续期 |
 | Dashboard 401 | 未登录 / 密码错 | 浏览器重新登录 |
 | `hold` / `grow` 报 API key 错误 / `401 Invalid token` | LLM key 未配置或不对；**或**你既用 `-e OMBRE_COMPRESS_API_KEY=...` 传了 env、又在面板改过 key —— 见下一行 | Dashboard → ③ 引擎 填入 Key 点「保存 Key」；确认 base_url、model 正确后用「测试」按钮自查 |
