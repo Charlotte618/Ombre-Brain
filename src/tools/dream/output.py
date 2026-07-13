@@ -151,7 +151,7 @@ def format_dream_output(
             feel_block = (
                 "\n\n=== 你的 feel 历史（全量，旧 feel 按 token 预算折叠）===\n"
                 "这里返回了你过去写下的所有 feel。越新的越完整；老 feel 只留一行跳跳点，防止 token 爆炸。\n"
-                "需要看某个老 feel 全文用 breath(query=..., domain=\"feel\") 或 trace 访问。\n"
+                "需要看某个老 feel 全文用 breath_advanced(query=..., domain=\"feel\") 或 trace 访问。\n"
                 "需要编辑用 trace(bucket_id, content=\"...\")；合并重复项可在仪表盘手动操作。\n\n"
                 + "\n".join(full_lines)
             )

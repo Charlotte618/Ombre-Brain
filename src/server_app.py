@@ -235,6 +235,39 @@ class MCPAcceptShim:
         await self.app(scope, receive, send)
 
 
+class NgrokHeaderMiddleware:
+    """Stamp every response with ``ngrok-skip-browser-warning`` (issue #16).
+
+    Deployments tunneled through ngrok's free tier serve an HTML browser-
+    warning interstitial instead of proxying to the origin. ngrok recognizes
+    this header (request *or* response side) as an explicit opt-out for
+    non-browser clients, which is what an MCP client like claude.ai always
+    is. Applied unconditionally so it also lands on auth-rejected and
+    error responses, not just successful tool calls.
+    """
+
+    _HEADER_NAME = b"ngrok-skip-browser-warning"
+    _HEADER_VALUE = b"true"
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_header(message: dict) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                if not any(key.lower() == self._HEADER_NAME for key, _ in headers):
+                    headers.append((self._HEADER_NAME, self._HEADER_VALUE))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_header)
+
+
 @dataclass
 class RuntimeLifecycle:
     """Own background service startup and shutdown for one HTTP app lifespan."""
@@ -420,6 +453,9 @@ def build_http_app(
         token_validator=token_validator,
         auth_mode=settings.auth_mode,
     )
+    # Outermost: must still fire on auth-rejected/error responses, not just
+    # successful tool calls, so add it last (see NgrokHeaderMiddleware).
+    app.add_middleware(NgrokHeaderMiddleware)
     app.state.ombre_http_settings = settings
     app.state.ombre_runtime_lifecycle = lifecycle
     return app

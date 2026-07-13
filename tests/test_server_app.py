@@ -12,6 +12,7 @@ from server_app import (
     HTTPRuntimeSettings,
     MCPAcceptShim,
     MCPAuthMiddleware,
+    NgrokHeaderMiddleware,
     RuntimeLifecycle,
     build_http_app,
     install_runtime_lifespan,
@@ -142,6 +143,71 @@ async def test_accept_shim_leaves_non_mcp_routes_unchanged(path):
     await middleware(scope, _empty_receive, _discard_send)
 
     assert downstream.scopes[0] is scope
+
+
+@pytest.mark.asyncio
+async def test_ngrok_header_middleware_adds_skip_warning_header():
+    downstream = RecordingASGIApp()
+    middleware = NgrokHeaderMiddleware(downstream)
+    messages = []
+    scope = {"type": "http", "path": "/mcp", "headers": []}
+
+    await middleware(scope, _empty_receive, _collect_into(messages))
+
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    assert (b"ngrok-skip-browser-warning", b"true") in start["headers"]
+
+
+@pytest.mark.asyncio
+async def test_ngrok_header_middleware_applies_regardless_of_status():
+    class RejectingApp:
+        async def __call__(self, scope, receive, send):
+            await send({"type": "http.response.start", "status": 401, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+    middleware = NgrokHeaderMiddleware(RejectingApp())
+    messages = []
+    scope = {"type": "http", "path": "/mcp", "headers": []}
+
+    await middleware(scope, _empty_receive, _collect_into(messages))
+
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    assert start["status"] == 401
+    assert (b"ngrok-skip-browser-warning", b"true") in start["headers"]
+
+
+@pytest.mark.asyncio
+async def test_ngrok_header_middleware_does_not_duplicate_existing_header():
+    class PreHeaderedApp:
+        async def __call__(self, scope, receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"ngrok-skip-browser-warning", b"true")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+
+    middleware = NgrokHeaderMiddleware(PreHeaderedApp())
+    messages = []
+    scope = {"type": "http", "path": "/mcp", "headers": []}
+
+    await middleware(scope, _empty_receive, _collect_into(messages))
+
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    assert start["headers"].count((b"ngrok-skip-browser-warning", b"true")) == 1
+
+
+@pytest.mark.asyncio
+async def test_ngrok_header_middleware_ignores_non_http_scopes():
+    downstream = RecordingASGIApp()
+    middleware = NgrokHeaderMiddleware(downstream)
+    scope = {"type": "lifespan"}
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
 
 
 @pytest.mark.asyncio
@@ -411,6 +477,7 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
         "ManagementRequestBodyLimitMiddleware",
         "MCPAcceptShim",
         "MCPAuthMiddleware",
+        "NgrokHeaderMiddleware",
     }
     assert app.state.ombre_http_settings is settings
     assert app.state.ombre_runtime_lifecycle is lifecycle

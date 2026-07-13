@@ -235,7 +235,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             )
         return (
             "权重池暂时平静——我手上没什么需要主动浮现的东西。\n"
-            "可以试试 breath(query=\"想找的关键词\") 走检索，\n"
+            "可以试试 breath_search(query=\"想找的关键词\") 走检索，\n"
             "或者 dream() 让我自己挑几段最近的记忆嚼一嚼。"
         )
 
