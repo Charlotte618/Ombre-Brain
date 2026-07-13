@@ -86,6 +86,45 @@ async def surface_search(
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
 
+    # A full bucket id is an address, not a semantic query.  Resolve it before
+    # embedding/BM25 work so callers can reliably read the on-disk source text
+    # immediately before trace(content=...) without an LLM or derived index in
+    # the path.  Archived/deleted and dedicated bucket types keep the same
+    # visibility boundary as ordinary search.
+    exact_id = query.strip()
+    try:
+        exact_bucket = await rt.bucket_mgr.get(exact_id)
+    except Exception as exc:
+        rt.logger.warning(
+            f"breath exact bucket lookup failed; continuing with search: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        exact_bucket = None
+    if exact_bucket:
+        meta = exact_bucket.get("metadata", {}) or {}
+        is_archived = meta.get("type") == "archived" or bool(meta.get("deleted_at"))
+        if (
+            not is_archived
+            and meta.get("type") not in ("feel", "plan", "letter")
+            and _can_surface_search(exact_bucket)
+            and _bucket_has_tags(meta, tag_filter)
+        ):
+            rendered, entry_tokens = render_stored_bucket(
+                exact_bucket,
+                f"[exact_bucket_id:true] [bucket_id:{exact_bucket['id']}]",
+            )
+            if entry_tokens > max_tokens:
+                return _BUDGET_NOTICE
+            asyncio.create_task(
+                rt.bucket_mgr.touch_many([exact_bucket["id"]], ripple=False)
+            )
+            if rt.fire_webhook:
+                await rt.fire_webhook(
+                    "breath",
+                    {"mode": "exact_id", "matches": 1, "chars": len(rendered)},
+                )
+            return rendered
+
     vector_scores, semantic_notice = await _semantic_scores(
         query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
     )

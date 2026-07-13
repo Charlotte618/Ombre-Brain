@@ -168,6 +168,46 @@ def test_breath_returns_matching_stored_content(mcp_client):
     assert bucket_id in result
 
 
+def test_exact_bucket_id_read_preserves_long_bullets_across_trace_append(mcp_client):
+    marker = _marker("raw-bullets")
+    original = "\n".join(
+        f"- {index:02d}. {marker} 原始条目，保留 bullet 与顺序"
+        for index in range(1, 36)
+    )
+    bucket_id = _hold(mcp_client, original)
+
+    before = mcp_client.call(
+        "breath", {"query": bucket_id, "max_results": 1, "max_tokens": 20000}
+    )
+    marker_at = before.index(f"[bucket_id:{bucket_id}]")
+    body_at = before.index("\n", marker_at) + 1
+    assert before[body_at:body_at + len(original)] == original
+    assert "[exact_bucket_id:true]" in before[:body_at]
+
+    appended = f"{original}\n- 36. {marker} 新增条目，不能覆盖前 35 条"
+    traced = mcp_client.call("trace", {"bucket_id": bucket_id, "content": appended})
+    assert bucket_id in traced
+
+    after = mcp_client.call(
+        "breath", {"query": bucket_id, "max_results": 1, "max_tokens": 20000}
+    )
+    marker_at = after.index(f"[bucket_id:{bucket_id}]")
+    body_at = after.index("\n", marker_at) + 1
+    assert after[body_at:body_at + len(appended)] == appended
+
+
+def test_grow_items_succeeds_without_compression_provider(mcp_client):
+    marker = _marker("grow-items")
+    result = mcp_client.call(
+        "grow",
+        {"items": [f"{marker}-one", f"{marker}-two"]},
+    )
+    assert "新2" in result
+    recalled = mcp_client.call("breath", {"query": marker, "max_results": 5})
+    assert f"{marker}-one" in recalled
+    assert f"{marker}-two" in recalled
+
+
 def test_grow_splits_long_content_and_persists_results(mcp_client):
     marker = _marker("grow")
     content = f"{marker} " + "long integration memory " * 8

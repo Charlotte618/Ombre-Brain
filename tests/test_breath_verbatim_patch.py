@@ -24,6 +24,13 @@ class DisabledEmbedding:
     enabled = False
 
 
+class ExplodingEmbedding:
+    enabled = True
+
+    async def search_similar_strict(self, query, top_k):
+        raise AssertionError("exact bucket-id lookup must not call embedding")
+
+
 class NoopDecay:
     is_running = True
 
@@ -116,6 +123,31 @@ async def test_query_single_bucket_returns_stored_content_exactly(bucket_mgr, mo
     assert dehydrator.calls == 0
     assert "待办" not in output
     assert "\n- " not in output
+
+
+@pytest.mark.asyncio
+async def test_query_equal_to_bucket_id_reads_raw_content_without_indexes(
+    bucket_mgr, monkeypatch
+):
+    original = "- 第一条原始 bullet\n- 第二条保留缩进\n  - 子项不能被摘要\n- 第三条"
+    bucket_id = await bucket_mgr.create(
+        content=original, domain=["记忆"], importance=10, pinned=True
+    )
+    dehydrator = _install_runtime(bucket_mgr)
+    rt.embedding_engine = ExplodingEmbedding()
+
+    async def unexpected_search(*args, **kwargs):
+        raise AssertionError("exact bucket-id lookup must not call BM25/search")
+
+    monkeypatch.setattr(bucket_mgr, "search", unexpected_search)
+
+    output = await dispatch(query=bucket_id, max_tokens=10000)
+    actual = _returned_body(output, bucket_id, len(original))
+    await asyncio.sleep(0)
+
+    assert actual == original
+    assert _sha256(actual) == _sha256(original)
+    assert dehydrator.calls == 0
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,18 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.6.1
+
+### 修复 / Fixed
+
+- `breath(query="<完整 bucket_id>")` 新增按 ID 直读通道：直接返回桶当前存储的完整 raw content，跳过 embedding、BM25 和 LLM 摘要/改写，避免 AI 在 `trace(content=...)` 前只能拿到压缩内容，进而覆盖原始 bullet、缩进或遗漏信息。
+- 精确 ID 读取继续遵守归档、软删除、专用桶类型与浮现策略边界；token 预算不足时整桶省略，不截断或压缩正文。
+
+### 测试 / Tests
+
+- 新增单元回归，断言精确 bucket ID 读取不调用 embedding、BM25/search 或 dehydrator，并逐字校验原始正文哈希。
+- 本地 Docker `streamable-http` 真机验证全部 12 个 MCP 工具及安全/并发边界；新增 35 条纯 bullet 桶 → 按 ID 原文读取 → `trace` 追加第 36 条 → 再次逐字读取的端到端回归。
+
 ## 2.6.0
 
 ### 修复 / Fixed

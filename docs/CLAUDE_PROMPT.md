@@ -41,6 +41,7 @@
 
 - 无参 → 让权重最高的未解决事自然浮上来。**对话开始第一件事**。
 - `breath(query="她最近的工作状态")` → 主动混合检索。语义可用时与关键词/BM25 融合；不可用时会明确提示并继续关键词检索。
+- `breath(query="完整 bucket_id")` → 按 ID 直读单个桶的完整原始 content，跳过向量、摘要和改写；在 `trace(content=...)` 前先这样读取，避免拿摘要覆盖原文。
 - `breath(domain="feel")` → 读我留下的所有第一人称感受（普通 breath 不会浮 feel）。
 - `breath(importance_min=8)` → 拉所有我标过 importance≥8 的核心事项，按重要度降序。
 - `breath(domain="work,relationship")` → 多领域过滤，逗号分隔。
