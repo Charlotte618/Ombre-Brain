@@ -220,6 +220,90 @@ async def test_overwrite_preserves_old_memory_under_unique_archived_id(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_overwrite_leaves_old_memory_untouched_when_new_content_write_fails(tmp_path, monkeypatch):
+    """回归锁死找茬会话发现的 bug：overwrite 冲突原来是「先删旧、再写新」，
+
+    写新内容失败时旧桶已经被移进 archive/ 改名，两边都没有=数据丢失。
+    修复后顺序反过来：新内容先完整落盘到暂存文件，写失败旧桶必须完全不受影响。
+    """
+    source_vault = tmp_path / "source"
+    _write_bucket(source_vault, content="imported version")
+    source_engine = _engine(_config(source_vault))
+    payload, _ = build_export_archive(
+        str(source_vault),
+        source_engine.db_path,
+        {
+            "exported_at": "now",
+            "version": "test",
+            "embedding": {"model": "test-embedding", "dim": 2, "backend": "api"},
+        },
+    )
+
+    target_vault = tmp_path / "target"
+    _write_bucket(target_vault, content="local version")
+    target_config = _config(target_vault)
+    target_engine = _engine(target_config)
+    manager = BucketManager(target_config, embedding_engine=target_engine)
+    migrate = MigrateEngine(target_config, manager, target_engine)
+
+    def _boom(self, pb, target_id, buckets_dir):
+        raise OSError("simulated disk failure while staging new content")
+
+    monkeypatch.setattr(MigrateEngine, "_write_bucket_file_staged", _boom)
+
+    await migrate.parse_zip(payload)
+    await migrate.apply({"memory-1": "overwrite"})
+
+    # 新内容落盘先炸：旧桶必须还在原地、原样、原 ID，完全没被删/被改名。
+    buckets = await manager.list_all(include_archive=True)
+    assert len(buckets) == 1
+    survivor = buckets[0]
+    assert survivor["id"] == "memory-1"
+    assert survivor["content"] == "local version"
+    assert survivor["metadata"].get("type") != "archived"
+    assert migrate._apply_errors, "写入失败应该被记录成一条 apply error"
+
+
+@pytest.mark.asyncio
+async def test_overwrite_cleans_up_staged_file_when_old_bucket_handling_fails(tmp_path, monkeypatch):
+    """写新内容成功，但处理旧桶（delete+rekey）失败：暂存文件必须被清理掉，
+
+    不能留下一个既不是新桶也不是旧桶、谁都不认的孤儿 .staging 文件。
+    """
+    source_vault = tmp_path / "source"
+    _write_bucket(source_vault, content="imported version")
+    source_engine = _engine(_config(source_vault))
+    payload, _ = build_export_archive(
+        str(source_vault),
+        source_engine.db_path,
+        {
+            "exported_at": "now",
+            "version": "test",
+            "embedding": {"model": "test-embedding", "dim": 2, "backend": "api"},
+        },
+    )
+
+    target_vault = tmp_path / "target"
+    _write_bucket(target_vault, content="local version")
+    target_config = _config(target_vault)
+    target_engine = _engine(target_config)
+    manager = BucketManager(target_config, embedding_engine=target_engine)
+    migrate = MigrateEngine(target_config, manager, target_engine)
+
+    def _boom(self, bucket_id):
+        raise OSError("simulated failure while archiving the old bucket")
+
+    monkeypatch.setattr(MigrateEngine, "_rekey_archived_conflict", _boom)
+
+    await migrate.parse_zip(payload)
+    await migrate.apply({"memory-1": "overwrite"})
+
+    staged_leftovers = list((target_vault / "dynamic").rglob("*.staging-*"))
+    assert staged_leftovers == [], f"暂存文件没被清理: {staged_leftovers}"
+    assert migrate._apply_errors, "旧桶处理失败应该被记录成一条 apply error"
+
+
+@pytest.mark.asyncio
 async def test_missing_snapshot_vector_is_durably_queued(tmp_path):
     source_vault = tmp_path / "source"
     _write_bucket(source_vault)

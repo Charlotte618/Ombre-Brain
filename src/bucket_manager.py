@@ -32,8 +32,10 @@ import asyncio
 import logging
 import math
 import shutil
+import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
@@ -45,6 +47,53 @@ except Exception:
     except Exception:
         def _ob_push_warning(*_a, **_kw):  # type: ignore
             return None
+
+
+@asynccontextmanager
+async def _filesystem_turn(base_dir: str, key: str, timeout_seconds: float = 30.0):
+    """Cross-thread/cross-loop mutual exclusion via atomic lock-file creation.
+
+    A plain ``asyncio.Lock`` only serializes tasks scheduled on the same event
+    loop; FastMCP may dispatch requests from different loops/threads (see the
+    identical rationale in tools/_common.py's ``_filesystem_content_turn``), so
+    quota check-then-write sequences (anchor's 24-cap) need an OS-level guard
+    instead of an in-process one.
+    """
+    if not base_dir:
+        yield
+        return
+    lock_dir = Path(base_dir) / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{key}.lock"
+    token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+    stale_seconds = 60.0
+    deadline = time.monotonic() + timeout_seconds
+    acquired = False
+    while not acquired:
+        try:
+            descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > stale_seconds:
+                    lock_path.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out waiting for {key} lock")
+            await asyncio.sleep(0.01)
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(token)
+            acquired = True
+    try:
+        yield
+    finally:
+        try:
+            if lock_path.read_text(encoding="utf-8") == token:
+                lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _clamp_importance(v, source: str) -> int:
@@ -286,6 +335,13 @@ class BucketManager:
         self._active_cache: "list[dict] | None" = None
         self._active_file_state: dict[str, tuple[int, int]] = {}
         self._active_cache_lock = asyncio.Lock()
+        # 见 _bucket_turn：archive()/update()/delete()/touch() 各自独立做
+        # find_file → load → mutate → atomic_write，互不知会。并发命中同一个
+        # bucket_id 时（比如衰减引擎后台 archive() 撞上一次 trace/hold 的
+        # update()），后到的那个基于自己读到的旧 file_path 写回，可能在另一个
+        # 已经把文件 move 进 archive/ 之后，在原路径「复活」一份带旧内容的
+        # 桶。找茬会话（2026-07-15）发现，按 tools/_common.py 里 _quota_turn
+        # 同一套跨 loop/进程文件锁方案修，见 _bucket_turn()。
         storage_cfg = config.get("storage", {}) or {}
         try:
             self.external_change_poll_seconds = max(
@@ -1148,6 +1204,16 @@ class BucketManager:
             logger.info(f"Moved bucket / 移动记忆桶: {filename} → {target_dir}/")
         return str(new_path)
 
+    def _bucket_turn(self, bucket_id: str):
+        """Serialize archive()/update()/delete()/touch() on the same bucket_id.
+
+        Uses the same cross-loop/cross-process lock-file mechanism as
+        ``tools/_common.py``'s ``_quota_turn`` rather than an ``asyncio.Lock``
+        — FastMCP may dispatch requests from different event loops/threads,
+        so an in-process lock would not actually serialize them.
+        """
+        return _filesystem_turn(str(self.base_dir), f"bucket-{bucket_id}")
+
     # ---------------------------------------------------------
     # Update bucket
     # 更新桶
@@ -1170,6 +1236,22 @@ class BucketManager:
         bump_active=True：把这次写入视作一次真实激活（如 hold/grow 合并近邻桶），
         同步刷新 last_active 并累加 activation_count，语义与 touch() 一致。
         """
+        async with self._bucket_turn(bucket_id):
+            return await self._update_locked(
+                bucket_id,
+                allow_embedding_fallback=allow_embedding_fallback,
+                bump_active=bump_active,
+                **kwargs,
+            )
+
+    async def _update_locked(
+        self,
+        bucket_id: str,
+        *,
+        allow_embedding_fallback: bool = False,
+        bump_active: bool = False,
+        **kwargs,
+    ) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
@@ -1487,6 +1569,10 @@ class BucketManager:
         F-10: 记忆不消失，只是淡去。不做物理删除，将文件移入 archive/
         并在 frontmatter 中写入 deleted_at 时间戳；embedding 仍清理以节省空间。
         """
+        async with self._bucket_turn(bucket_id):
+            return await self._delete_locked(bucket_id)
+
+    async def _delete_locked(self, bucket_id: str) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
@@ -1559,6 +1645,10 @@ class BucketManager:
 
         ripple=False 可跳过读全库的时间涟漪（性能 P2：批量浮现时不值当为它多跑 list_all）。
         """
+        async with self._bucket_turn(bucket_id):
+            await self._touch_locked(bucket_id, ripple=ripple)
+
+    async def _touch_locked(self, bucket_id: str, ripple: bool = True) -> None:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return
@@ -1907,6 +1997,13 @@ class BucketManager:
 
         Returns: {"ok": bool, "anchor": bool, "count": int, "limit": int, "error": Optional[str]}
         """
+        # anchor 上限 24 是「先数后写」的两步操作；没有这把锁，两个并发
+        # set_anchor(True) 都能在对方提交前读到同一个 count<limit，一起通过
+        # 检查后各自 update()，把总数冲破硬上限。
+        async with _filesystem_turn(str(self.base_dir), "quota-anchor"):
+            return await self._set_anchor_locked(bucket_id, value)
+
+    async def _set_anchor_locked(self, bucket_id: str, value: bool) -> dict:
         bucket = await self.get(bucket_id)
         if not bucket:
             return {"ok": False, "error": "bucket not found", "count": 0, "limit": self.ANCHOR_LIMIT}
@@ -2102,6 +2199,10 @@ class BucketManager:
         Move a bucket into the archive directory (preserving domain subdirs).
         将指定桶移入归档目录（保留域子目录结构）。
         """
+        async with self._bucket_turn(bucket_id):
+            return await self._archive_locked(bucket_id)
+
+    async def _archive_locked(self, bucket_id: str) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False

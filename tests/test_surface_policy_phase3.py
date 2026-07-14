@@ -115,7 +115,7 @@ class FakeSearchRequest:
 
 
 class FakeSearchBucketManager:
-    async def search(self, query, limit=10):
+    async def search(self, query, limit=10, vector_scores=None):
         assert query == "memory"
         return [
             _bucket(id="visible", name="Visible", importance=8),
@@ -153,3 +153,43 @@ async def test_dashboard_search_filters_terminal_states_but_keeps_dont_surface(m
     payload = json.loads(response.body.decode("utf-8"))
 
     assert [bucket["id"] for bucket in payload] == ["visible", "hidden"]
+    # 响应体形状不变（前端依赖 Array.isArray），语义检索状态走响应头。
+    assert isinstance(payload, list)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_search_reports_semantic_degraded_via_header_when_provider_off(monkeypatch):
+    """回归锁死找茬会话发现的 bug：语义服务不可用时 /api/search 原来完全
+
+    静默降级——bucket_mgr.search() 内部自己吞掉 embedding 异常，调用方拿到
+    的响应体和「语义检索正常」时长得一模一样，没有任何信号。"""
+    monkeypatch.setattr(web_search.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(web_search.sh, "bucket_mgr", FakeSearchBucketManager(), raising=False)
+    monkeypatch.setattr(web_search.sh, "embedding_engine", None, raising=False)
+
+    mcp = FakeMCP()
+    web_search.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/search")](FakeSearchRequest())
+
+    assert response.headers.get("x-semantic-search") == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_search_reports_semantic_ok_when_provider_available(monkeypatch):
+    class FakeEmbeddingEngine:
+        enabled = True
+
+        async def search_similar_strict(self, query, top_k=20):
+            return [("visible", 0.9)]
+
+    monkeypatch.setattr(web_search.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(web_search.sh, "bucket_mgr", FakeSearchBucketManager(), raising=False)
+    monkeypatch.setattr(web_search.sh, "embedding_engine", FakeEmbeddingEngine(), raising=False)
+
+    mcp = FakeMCP()
+    web_search.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/search")](FakeSearchRequest())
+
+    assert response.headers.get("x-semantic-search") == "ok"

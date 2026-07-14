@@ -232,6 +232,56 @@ async def test_provider_circuit_breaker_stops_failure_storm_and_recovers(tmp_pat
         await outbox.stop()
 
 
+@pytest.mark.asyncio
+async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
+    """回归锁死找茬会话发现的 bug：一条内容永久失败的桶反复重试，
+
+    绝不能把熔断器跳到全局打开，连累队列里所有其他合法待处理的记忆一起
+    卡住（原来的实现把「同一个桶重试很多次」和「供应商真的挂了」算成同一
+    件事，都计入熔断计数）。
+    """
+    config = _config(
+        tmp_path,
+        circuit_failure_threshold=2,
+        circuit_base_seconds=5,
+        circuit_max_seconds=5,
+    )
+    poison_bucket_id_holder: list[str] = []
+
+    class LazyPoisonEngine(RecordingEngine):
+        async def generate_and_store(self, bucket_id, content):
+            self.calls.append((bucket_id, content))
+            if poison_bucket_id_holder and bucket_id == poison_bucket_id_holder[0]:
+                return False
+            self.hashes[bucket_id] = content_hash(content)
+            return True
+
+    engine = LazyPoisonEngine()
+    manager = BucketManager(config, embedding_engine=engine)
+    outbox = EmbeddingOutbox(config, manager, engine)
+    manager.attach_embedding_outbox(outbox)
+
+    await outbox.start(reconcile=False)
+    try:
+        poison_id = await manager.create(content="这条内容永远生成不出向量")
+        poison_bucket_id_holder.append(poison_id)
+
+        # 毒药桶自己反复重试很多次（远超 circuit_failure_threshold=2），
+        # 熔断绝不能因此打开。
+        await _wait_for(lambda: len(engine.calls) >= 5, timeout=2.0)
+        assert outbox.status()["circuit"]["state"] == "closed"
+        assert outbox.status()["circuit"]["trips"] == 0
+
+        # 熔断没开着，新写入的合法记忆必须正常被处理，不会陪毒药桶一起卡住。
+        good_id = await manager.create(content="一条完全正常的记忆")
+        await _wait_for(
+            lambda: any(bid == good_id for bid, _c in engine.calls), timeout=1.0
+        )
+        assert good_id in engine.hashes
+    finally:
+        await outbox.stop()
+
+
 def test_embedding_schema_migrates_and_records_content_hash(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()

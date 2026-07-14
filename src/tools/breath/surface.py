@@ -130,7 +130,12 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             ).timestamp()
         except (ValueError, TypeError):
             last_ts = 0.0
-        av = float(meta.get("arousal") or 0.3) * float(meta.get("valence") or 0.5)
+        # `or` 会把合法的 0.0（比如效价/唤醒度恰好为极端值的记忆）当成缺失值
+        # 吞掉，静默换成默认值——用 .get(key, default) 才能保留 0.0 本身。
+        try:
+            av = float(meta.get("arousal", 0.3)) * float(meta.get("valence", 0.5))
+        except (TypeError, ValueError):
+            av = 0.3 * 0.5
         imp = int(meta.get("importance") or 5)
         return (score, last_ts, av, imp)
 

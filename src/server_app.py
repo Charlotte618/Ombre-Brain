@@ -235,6 +235,61 @@ class MCPAcceptShim:
         await self.app(scope, receive, send)
 
 
+class OriginCSRFGuardMiddleware:
+    """Reject cross-origin state-changing requests to the cookie-session surface.
+
+    CORS below is wide open (``allow_origins=["*"]``) only so browser-based MCP
+    clients (e.g. claude.ai) can call ``/mcp`` cross-origin with a Bearer token.
+    That has no business relaxing the Origin for the cookie-session dashboard
+    (``/auth/*``, ``/api/*``, ...): a POST/PUT/DELETE whose ``Origin`` doesn't
+    match its own ``Host`` has no legitimate reason to mutate password/session
+    state there, no matter what the CORS preflight allowed. ``/mcp``,
+    ``/oauth/*`` and ``/.well-known/*`` are exempt — they authenticate via
+    bearer tokens / proof-of-possession (PKCE), not ambient cookies, so a
+    mismatched Origin there isn't a CSRF risk.
+    """
+
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+    _EXEMPT_PREFIXES = ("/oauth/", "/.well-known/")
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    def _is_exempt(self, path: str) -> bool:
+        if is_mcp_endpoint_path(path):
+            return True
+        return any(path.startswith(prefix) for prefix in self._EXEMPT_PREFIXES)
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        method = str(scope.get("method", "GET")).upper()
+        path = str(scope.get("path", ""))
+        if method in self._SAFE_METHODS or self._is_exempt(path):
+            await self.app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        origin = headers.get(b"origin", b"").decode("latin-1").rstrip("/")
+        if origin:
+            _, own_base = _request_resource(scope, headers)
+            if origin != own_base.rstrip("/"):
+                body = json.dumps({"error": "Cross-origin request rejected"}).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 403,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(body)).encode()],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": body, "more_body": False})
+                return
+        await self.app(scope, receive, send)
+
+
 class NgrokHeaderMiddleware:
     """Stamp every response with ``ngrok-skip-browser-warning`` (issue #16).
 
@@ -438,6 +493,7 @@ def build_http_app(
         allow_headers=["*"],
         expose_headers=["*"],
     )
+    app.add_middleware(OriginCSRFGuardMiddleware)
     app.add_middleware(
         MCPRequestBodyLimitMiddleware,
         max_bytes=settings.max_request_bytes,

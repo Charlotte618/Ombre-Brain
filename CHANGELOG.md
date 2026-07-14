@@ -2,6 +2,27 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.7.0
+
+一次系统性找茬（对抗式代码审查）后的批量修复，覆盖安全、数据丢失、竞态、检索质量、历史对话导入四类问题。
+
+### 安全 / Security
+
+- 修复 CORS 通配符（`allow_origins=["*"]`，覆盖除 `/mcp` 外的整个 HTTP app）叠加 `/auth/setup` 无限流，可被恶意网页跨站劫持首次设置的 Dashboard 密码：新增 `OriginCSRFGuardMiddleware`，非安全方法（POST/PUT/DELETE）且 `Origin` 与自身 `Host` 不符即拒绝，豁免 `/mcp`/`/oauth/*`/`.well-known`（这些走 Bearer token / PKCE，不依赖 cookie）；`/auth/setup` 补上与 `/auth/login` 一致的限流。
+
+### 修复 / Fixed
+
+- `trace(bucket_id, importance=9)` 完全绕过 importance≥9 硬上限（配额检查此前只在 `hold` 的创建路径生效）；`letter_write` 固定 `importance=10` 却未排除在配额计数外，会永久占位挤占正常记忆的配额；pinned/anchor/importance 三处配额都是「先数后写」两步走，并发请求可冲破硬上限——三处统一接入跨进程文件锁（`_quota_turn` / `_bucket_turn`）序列化。
+- 导入别的 OB 实例导出的备份包时，`overwrite` 冲突处理是「先删旧桶、再写新内容」，写新内容失败会导致旧桶已删、新内容未写，净丢失一条记忆；改成新内容先完整落盘到暂存文件，确认成功后才处理旧桶。
+- `bucket_manager` 的 `archive()`/`update()`/`delete()`/`touch()` 各自独立读改写、互不知会，衰减引擎后台归档撞上并发的 `trace`/`hold` 写入时可能把已归档的桶在原路径复活成一份带旧内容的重复桶；四个方法统一接入同一把跨 loop/进程文件锁。
+- embedding 后端切换（本地 ↔ API）的迁移引擎文档写了「先写 `.migrating` 暂存、全部成功后原子替换主库」，实际代码从始至终直接原地改 `embeddings.db`，中途失败会让主库永久混入新旧模型/维度不一致的向量；现在真正实现了暂存+原子替换，并给断点续传的 checkpoint 加上目标签名（backend:model:dim），换目标后不会把不兼容的旧向量当成「已完成」。
+- 衰减引擎的自动结案（重要度≤4 且超期未激活 → 强制 `resolved=True`）漏排除 `plan`/`letter` 类型，违反「plan 生命周期只由 status 驱动、letter 永久原样保留」的设计承诺。
+- embedding 后台重试队列的熔断器把「单条内容本身有毒（比如触发 provider 内容过滤）反复失败」和「供应商真的挂了」算成同一件事，一条坏内容能把熔断顶到 600 秒上限、连累所有新写入的合法记忆一起卡住；改成只有失败发生在不同的桶身上才计入熔断计数。
+- `breath` 无参浮现排序的情感强度 tiebreak 用 `meta.get("arousal") or 0.3`，Python 里 `0.0` 是合法存储值却被 `or` 当缺失值静默换成默认值，误伤效价/唤醒度恰好为极端值的记忆。
+- Dashboard `/api/search` 语义索引不可用时完全静默降级，响应体和「语义检索正常」时长得一模一样；改成显式跑一次向量查询，降级状态通过 `X-Semantic-Search` 响应头暴露（响应体形状不变，不破坏现有前端）。
+- 历史对话导入（`import_memory.py`）四处修复：① `preserve_raw` 特殊内容断点续传时会重复导入（进度只在整个 chunk 处理完才落盘，崩溃重启后同一 chunk 重新提取一遍，原文逐字保留场景原来完全没有去重）；② `source_hash` 只按原文算，没算进 `human` 称呼字段，暂停期间改了称呼会导致续传时分块边界错位；③ 单次提取正文固定按 12000 字符截断，对英文/中英混合内容而言远小于块本身 ~10000 token 的目标预算，且不留任何痕迹地丢内容；④ 单条存储失败只打日志不计入 `state.errors`，`/api/import/status` 看不出为什么创建数比调用数少；顺带把 `ImportState.save()` 换成 `utils.atomic_write_text`（补上 fsync 与 Windows 长路径前缀）。
+- `github_sync.py` 从 GitHub 恢复备份时写文件用裸 `open()`/`os.makedirs()`，没有 Windows 长路径前缀，深层目录结构的备份在超过 260 字符 MAX_PATH 时会静默跳过该文件。
+
 ## 2.6.13
 
 ### 修复 / Fixed

@@ -19,6 +19,10 @@ migrate_engine.py — 完整记忆包导入引擎
 - 不调用 LLM（不做内容解析/摘要/打标，只做文件迁移）
 - 不修改 config
 - 不做对话历史解析（那是 import_memory.py 的事）
+- 不做 embedding 后端切换（backend 换成 local/api 时的全库重算是
+  migration_engine.py 的事——两个文件名高度相似，改代码前务必确认
+  自己改的是哪一个：这里是"导入别的 OB 实例导出的完整备份包"，
+  migration_engine.py 是"给当前库所有记忆重新生成向量"）
 
 对外暴露：MigrateEngine 类（被 server.py 实例化并注入路由）
 ========================================
@@ -45,10 +49,10 @@ try:
         read_backup_archive,
         validate_sqlite_bytes,
     )
-    from utils import now_iso, safe_path, sanitize_name  # type: ignore
+    from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 except ImportError:  # pragma: no cover
     from .backup_archive import BackupArchiveError, read_backup_archive, validate_sqlite_bytes  # type: ignore
-    from .utils import now_iso, safe_path, sanitize_name  # type: ignore
+    from .utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
 
 logger = logging.getLogger("ombre_brain.migrate")
 
@@ -106,6 +110,15 @@ class ConflictInfo:
 # ============================================================
 # 辅助函数
 # ============================================================
+
+def _safe_unlink(path: str) -> None:
+    """尽力删除一个暂存文件；失败只记日志，不让清理动作掩盖真正的异常。"""
+    try:
+        if path and os.path.exists(path):
+            os.unlink(path)
+    except OSError as e:
+        logger.warning(f"[migrate] failed to clean up staged file {path}: {e}")
+
 
 def _parse_md_meta(raw: bytes) -> tuple[dict, str]:
     """从 md 字节中解析 frontmatter 元数据 + 正文。失败返回空 dict + 空串。"""
@@ -458,13 +471,33 @@ class MigrateEngine:
                         continue
 
                     if is_conflict and decision == "overwrite":
-                        # OB 不做物理抹除：旧桶先软删除归档，再换一个历史 ID，
-                        # 把原 ID 留给导入版本。否则 active/archive 会出现重复 ID。
-                        await self._bucket_mgr.delete(pb.bucket_id)
+                        # 新内容先完整渲染+落盘到一个暂存文件，确认「能安全写入
+                        # 磁盘」这件事成立之后，才去碰旧桶——避免旧桶已经被移入
+                        # archive/、新内容却写失败，两边都没有导致数据丢失
+                        # （原 bug：overwrite 全程无回滚，异常只会被记成一条
+                        # skip/error，旧桶永久性地只剩一个 `-superseded-` 残影）。
+                        content, target_path, staged_path = await asyncio.to_thread(
+                            self._write_bucket_file_staged, pb, pb.bucket_id, buckets_dir
+                        )
+                        try:
+                            # OB 不做物理抹除：旧桶先软删除归档，再换一个历史 ID，
+                            # 把原 ID 留给导入版本。否则 active/archive 会出现重复 ID。
+                            await self._bucket_mgr.delete(pb.bucket_id)
+                            await asyncio.to_thread(
+                                self._rekey_archived_conflict, pb.bucket_id
+                            )
+                        except Exception:
+                            await asyncio.to_thread(_safe_unlink, staged_path)
+                            raise
                         await asyncio.to_thread(
-                            self._rekey_archived_conflict, pb.bucket_id
+                            os.replace, _win_long_path(staged_path), _win_long_path(target_path)
                         )
                         target_id = pb.bucket_id
+                        self._apply_imported += 1
+                        imported_id_map[pb.bucket_id] = target_id
+                        imported_contents[target_id] = content
+                        self._apply_done += 1
+                        continue
                     elif is_conflict and decision == "keep_both":
                         # 分配新 ID，两个桶共存
                         target_id = str(uuid.uuid4())
@@ -520,10 +553,14 @@ class MigrateEngine:
             self._error_message = str(e)
             logger.error(f"[migrate] apply failed: {e}", exc_info=True)
 
-    def _write_bucket_file(
+    def _render_bucket(
         self, pb: _ParsedBucket, target_id: str, buckets_dir: str
-    ) -> str:
-        """（在线程中执行）写入 bucket markdown 文件，返回正文内容。"""
+    ) -> tuple[str, str, str]:
+        """（在线程中执行）纯计算：解析 frontmatter，算出目标路径和序列化后的
+        markdown。除了 os.makedirs 建目录外不做任何磁盘写入。
+
+        返回 (content, target_path, rendered)。
+        """
         meta, content = _parse_md_meta(pb.md_bytes)
 
         # 始终写显式 ID；恢复不依赖文件名猜测。
@@ -561,22 +598,52 @@ class MigrateEngine:
         # 重新序列化 frontmatter + 正文
         post = frontmatter.Post(content, **meta)
         rendered = frontmatter.dumps(post)
-        temp_path = f"{target_path}.{uuid.uuid4().hex}.tmp"
+        return content, target_path, rendered
+
+    @staticmethod
+    def _atomic_write(path: str, rendered: str) -> None:
+        # 用 _win_long_path 前缀绕开 Windows 260 字符 MAX_PATH：sanitize 后的
+        # domain 嵌套路径在深层 buckets_dir 下真的会超限（同款问题 utils.
+        # atomic_write_text 已经踩过并修过，这里保持一致而不是各写各的）。
+        temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        temp_path_long = _win_long_path(temp_path)
         try:
-            with open(temp_path, "w", encoding="utf-8") as f:
+            with open(temp_path_long, "w", encoding="utf-8") as f:
                 f.write(rendered)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_path, target_path)
+            os.replace(temp_path_long, _win_long_path(path))
         finally:
             try:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
+                if os.path.exists(temp_path_long):
+                    os.unlink(temp_path_long)
             except OSError:
                 pass
 
+    def _write_bucket_file(
+        self, pb: _ParsedBucket, target_id: str, buckets_dir: str
+    ) -> str:
+        """（在线程中执行）写入 bucket markdown 文件，返回正文内容。"""
+        content, target_path, rendered = self._render_bucket(pb, target_id, buckets_dir)
+        self._atomic_write(target_path, rendered)
         logger.debug(f"[migrate] wrote {target_path} (id={target_id})")
         return content
+
+    def _write_bucket_file_staged(
+        self, pb: _ParsedBucket, target_id: str, buckets_dir: str
+    ) -> tuple[str, str, str]:
+        """（在线程中执行）把新内容写到跟 target_path 同目录的暂存文件，不动
+        target_path 本身。
+
+        专供 overwrite 冲突路径使用：写入成功之后调用方才决定要不要碰旧桶，
+        写入失败则旧桶完全没被动过。返回 (content, target_path, staged_path)；
+        调用方在确认旧桶已安全处理完之后自己 os.replace(staged_path, target_path)。
+        """
+        content, target_path, rendered = self._render_bucket(pb, target_id, buckets_dir)
+        staged_path = f"{target_path}.staging-{uuid.uuid4().hex}"
+        self._atomic_write(staged_path, rendered)
+        logger.debug(f"[migrate] staged {staged_path} (id={target_id}, target={target_path})")
+        return content, target_path, staged_path
 
     def _rekey_archived_conflict(self, bucket_id: str) -> str:
         """Give the preserved pre-overwrite archive a unique historical ID."""
@@ -593,21 +660,9 @@ class MigrateEngine:
             os.path.dirname(file_path),
             f"{safe_name}_{new_id}.md",
         ))
-        temp_path = f"{target_path}.{uuid.uuid4().hex}.tmp"
-        try:
-            with open(temp_path, "w", encoding="utf-8") as handle:
-                handle.write(frontmatter.dumps(post))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, target_path)
-            if os.path.abspath(target_path) != os.path.abspath(file_path):
-                os.unlink(file_path)
-        finally:
-            try:
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except OSError:
-                pass
+        self._atomic_write(target_path, frontmatter.dumps(post))
+        if os.path.abspath(target_path) != os.path.abspath(file_path):
+            os.unlink(_win_long_path(file_path))
         return new_id
 
     def _merge_embeddings(self, db_bytes: bytes, id_map: dict[str, str]) -> set[str]:

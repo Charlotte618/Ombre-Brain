@@ -26,12 +26,20 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
 """
 
 import math
+from contextlib import AsyncExitStack
 from typing import Optional
 
 from memory_messages import resolved_hint
 from utils import parse_bool
 from .. import _runtime as rt
-from .._common import check_content_size, check_metadata_size, check_pinned_quota
+from .._common import (
+    _HIGH_IMP_THRESHOLD,
+    _quota_turn,
+    check_content_size,
+    check_metadata_size,
+    check_pinned_quota,
+    enforce_high_importance_quota,
+)
 
 
 async def trace_core(
@@ -187,80 +195,103 @@ async def trace_core(
             "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
         )
 
-    updates: dict = {}
-    if name:
-        updates["name"] = name
-    if domain:
-        updates["domain"] = [d.strip() for d in domain.split(",") if d.strip()]
-    if 0 <= valence <= 1:
-        updates["valence"] = valence
-    if 0 <= arousal <= 1:
-        updates["arousal"] = arousal
-    if 1 <= importance <= 10:
-        updates["importance"] = importance
-    if tags:
-        updates["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
-    if resolved in (0, 1):
-        updates["resolved"] = bool(resolved)
-    if pinned in (0, 1):
-        updates["pinned"] = bool(pinned)
-        if pinned == 1:
-            if not bucket.get("metadata", {}).get("pinned"):
-                err = await check_pinned_quota()
-                if err:
-                    return err
-            updates["importance"] = 10
-    if digested in (0, 1):
-        updates["digested"] = bool(digested)
-    if content:
-        size_err = check_content_size(content)
-        if size_err:
-            return size_err
-        updates["content"] = content
-    if status:
-        s = status.strip().lower()
-        if s in ("active", "resolved", "abandoned"):
-            updates["status"] = s
-    if 0 <= weight <= 1:
-        updates["weight"] = float(weight)
-    if dont_surface in (0, 1):
-        updates["dont_surface"] = bool(dont_surface)
-    why_remembered = str(why_remembered).strip()
-    if why_remembered == "\\clear":
-        updates["why_remembered"] = ""
-    elif why_remembered:
-        updates["why_remembered"] = why_remembered[:500]
+    # 配额判定 + 落盘必须在同一把锁里：check_pinned_quota/enforce_high_importance_quota
+    # 到最终 bucket_mgr.update() 之间隔着别的字段处理和一次 await，两个并发 trace()
+    # 都可能在对方提交前读到同一个「未满」快照。是否需要哪把锁在动 updates 之前就
+    # 能从入参判断出来，所以先算好，再把整段检查+落盘包进对应的 quota turn。
+    current_importance = int(meta.get("importance") or 0)
+    already_counted_importance = current_importance >= _HIGH_IMP_THRESHOLD and not (
+        meta.get("pinned") or meta.get("protected")
+    )
+    need_importance_lock = (
+        1 <= importance <= 10
+        and importance >= _HIGH_IMP_THRESHOLD
+        and not already_counted_importance
+    )
+    need_pinned_lock = pinned == 1 and not bucket.get("metadata", {}).get("pinned")
 
-    # --- Miss: meaning / media —— 追加是日常操作，整体替换只用于纠错/清理 ---
-    if meaning_append.strip():
-        updates["meaning_append"] = meaning_append.strip()
-    if meaning_replace is not None:
-        updates["meaning"] = meaning_replace
-    if media_append:
-        updates["media_append"] = media_append
-    if media_replace is not None:
-        updates["media"] = media_replace
+    async with AsyncExitStack() as quota_stack:
+        if need_pinned_lock:
+            await quota_stack.enter_async_context(_quota_turn("pinned"))
+        if need_importance_lock:
+            await quota_stack.enter_async_context(_quota_turn("high_importance"))
 
-    if not updates:
-        return "没有任何字段需要修改。"
+        updates: dict = {}
+        if name:
+            updates["name"] = name
+        if domain:
+            updates["domain"] = [d.strip() for d in domain.split(",") if d.strip()]
+        if 0 <= valence <= 1:
+            updates["valence"] = valence
+        if 0 <= arousal <= 1:
+            updates["arousal"] = arousal
+        if 1 <= importance <= 10:
+            if need_importance_lock:
+                importance = await enforce_high_importance_quota(importance)
+            updates["importance"] = importance
+        if tags:
+            updates["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+        if resolved in (0, 1):
+            updates["resolved"] = bool(resolved)
+        if pinned in (0, 1):
+            updates["pinned"] = bool(pinned)
+            if pinned == 1:
+                if need_pinned_lock:
+                    err = await check_pinned_quota()
+                    if err:
+                        return err
+                updates["importance"] = 10
+        if digested in (0, 1):
+            updates["digested"] = bool(digested)
+        if content:
+            size_err = check_content_size(content)
+            if size_err:
+                return size_err
+            updates["content"] = content
+        if status:
+            s = status.strip().lower()
+            if s in ("active", "resolved", "abandoned"):
+                updates["status"] = s
+        if 0 <= weight <= 1:
+            updates["weight"] = float(weight)
+        if dont_surface in (0, 1):
+            updates["dont_surface"] = bool(dont_surface)
+        why_remembered = str(why_remembered).strip()
+        if why_remembered == "\\clear":
+            updates["why_remembered"] = ""
+        elif why_remembered:
+            updates["why_remembered"] = why_remembered[:500]
 
-    # --- plan 桶：status / content 改变时追加 change_log ---
-    if bucket.get("metadata", {}).get("type") == "plan" and ("status" in updates or "content" in updates):
-        from .._common import append_plan_change_log
-        old_meta = bucket.get("metadata", {})
-        history = list(old_meta.get("change_log") or [])
-        if "status" in updates and updates["status"] != old_meta.get("status"):
-            history = append_plan_change_log(
-                history, "status",
-                **{"from": old_meta.get("status"), "to": updates["status"]},
-            )
-        if "content" in updates:
-            history = append_plan_change_log(history, "edit")
-        updates["change_log"] = history
+        # --- Miss: meaning / media —— 追加是日常操作，整体替换只用于纠错/清理 ---
+        if meaning_append.strip():
+            updates["meaning_append"] = meaning_append.strip()
+        if meaning_replace is not None:
+            updates["meaning"] = meaning_replace
+        if media_append:
+            updates["media_append"] = media_append
+        if media_replace is not None:
+            updates["media"] = media_replace
 
-    success = await rt.bucket_mgr.update(bucket_id, **updates)
-    if not success:
-        return f"修改失败: {bucket_id}"
+        if not updates:
+            return "没有任何字段需要修改。"
+
+        # --- plan 桶：status / content 改变时追加 change_log ---
+        if bucket.get("metadata", {}).get("type") == "plan" and ("status" in updates or "content" in updates):
+            from .._common import append_plan_change_log
+            old_meta = bucket.get("metadata", {})
+            history = list(old_meta.get("change_log") or [])
+            if "status" in updates and updates["status"] != old_meta.get("status"):
+                history = append_plan_change_log(
+                    history, "status",
+                    **{"from": old_meta.get("status"), "to": updates["status"]},
+                )
+            if "content" in updates:
+                history = append_plan_change_log(history, "edit")
+            updates["change_log"] = history
+
+        success = await rt.bucket_mgr.update(bucket_id, **updates)
+        if not success:
+            return f"修改失败: {bucket_id}"
 
     # 注意：bucket_mgr.update() 在 "content" in kwargs 时已经内部调用
     # update(content=...) 会投递 embedding outbox（见 bucket_manager.py），这里不需要

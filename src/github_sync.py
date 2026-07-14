@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from utils import _win_long_path
+
 logger = logging.getLogger("ombre_brain.github_sync")
 
 _API = "https://api.github.com"
@@ -165,19 +167,25 @@ class GitHubSync:
                             data = base64.b64decode(bj.get("content", ""))
                         else:
                             data = (bj.get("content", "") or "").encode("utf-8")
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        # _win_long_path 前缀绕开 Windows 260 字符 MAX_PATH：恢复
+                        # 备份是这个前缀存在的头号场景——sanitize 后的深层 domain
+                        # 路径叠上一个本来就很长的安装目录，真的会超限（同款问题
+                        # utils.atomic_write_text 已经踩过并修过）。
+                        dest_long = _win_long_path(dest)
+                        os.makedirs(_win_long_path(os.path.dirname(dest)), exist_ok=True)
                         # 原子写：导入是覆盖本地记忆的操作，写到一半被中断绝不能留半截文件。
                         _tmp = f"{dest}.{uuid.uuid4().hex}.tmp"
+                        _tmp_long = _win_long_path(_tmp)
                         try:
-                            with open(_tmp, "wb") as f:
+                            with open(_tmp_long, "wb") as f:
                                 f.write(data)
                                 f.flush()
                                 os.fsync(f.fileno())
-                            os.replace(_tmp, dest)
+                            os.replace(_tmp_long, dest_long)
                         except Exception:
-                            if os.path.exists(_tmp):
+                            if os.path.exists(_tmp_long):
                                 try:
-                                    os.remove(_tmp)
+                                    os.remove(_tmp_long)
                                 except OSError:
                                     pass
                             raise

@@ -44,6 +44,13 @@ def register(mcp) -> None:
         from starlette.responses import JSONResponse
         if not sh._is_setup_needed():
             return JSONResponse({"error": "Already configured"}, status_code=400)
+        retry = sh._login_retry_after(request)
+        if retry:
+            return JSONResponse(
+                {"error": f"尝试过于频繁，请 {retry} 秒后再试"},
+                status_code=429,
+                headers={"Retry-After": str(retry)},
+            )
         try:
             body = await request.json()
         except Exception:

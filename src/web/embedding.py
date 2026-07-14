@@ -317,11 +317,13 @@ def register(mcp) -> None:
             from migration_engine import (  # type: ignore
                 MigrationConfig, start_migration, is_running,
                 status_path_for as _mig_status_path_for,
+                staging_db_path_for, reset_stale_migration_state, target_signature,
             )
         except ImportError:
             from .migration_engine import (  # type: ignore
                 MigrationConfig, start_migration, is_running,
                 status_path_for as _mig_status_path_for,
+                staging_db_path_for, reset_stale_migration_state, target_signature,
             )
 
         if is_running():
@@ -344,10 +346,16 @@ def register(mcp) -> None:
         if body.get("model"):
             target_emb_cfg["model"] = str(body["model"]).strip()
 
+        # 迁移过程只写这个 staging db，绝不碰 live db，直到全部成功才原子替换
+        # （见 migration_engine.py 的 _run_migration）。
+        _live_db_path = getattr(sh.embedding_engine, "db_path", "") or os.path.join(
+            sh.config.get("buckets_dir", "buckets"), "embeddings.db"
+        )
         try:
             from embedding_engine import EmbeddingEngine  # type: ignore
         except ImportError:
             from ..embedding_engine import EmbeddingEngine  # type: ignore
+        target_emb_cfg["db_path"] = staging_db_path_for(_live_db_path)
         try:
             target_engine = EmbeddingEngine(target_cfg)
         except OBStartupError as oe:
@@ -362,6 +370,23 @@ def register(mcp) -> None:
             }, status_code=400)
 
         target_backend_obj = getattr(target_engine, "_backend", None)
+
+        # 目标签名（真正解析出来的 model/dim，不是请求里可能留空的原始参数）
+        # 跟上次不一致，说明 staging db 里如果有残留向量是另一个模型留下的，
+        # checkpoint 记的 done_ids 同样作废——必须先清掉再继续，否则断点续传
+        # 会把不兼容的旧向量当成「这个新目标已经完成」，直接原子替换进主库。
+        # _init_db() 是幂等的 CREATE TABLE IF NOT EXISTS，清空后必须重跑一次，
+        # 否则 target_engine 后续 sqlite3.connect() 会在空文件上直接建表失败。
+        if target_backend_obj is not None:
+            _signature = target_signature(
+                target_backend,
+                target_backend_obj.model_name(),
+                target_backend_obj.vector_dim(),
+            )
+            reset_stale_migration_state(
+                sh.config.get("buckets_dir", "buckets"), _live_db_path, _signature
+            )
+            target_engine._init_db()
 
         # 预检（fail-fast）：先用目标引擎试嵌入一小段，确认后端真的可用，
         # 再决定要不要启动全库重算。否则切到本地但 bge-m3 没下载 / ollama 没起，

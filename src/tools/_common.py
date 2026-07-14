@@ -164,9 +164,8 @@ async def _filesystem_content_turn(key: str):
 
 
 @asynccontextmanager
-async def _content_turn(content: str):
-    """Serialize identical writes across tasks, loops, and request threads."""
-    key = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:_CONTENT_LOCK_KEY_HEX]
+async def _keyed_turn(key: str):
+    """Serialize operations sharing ``key`` across tasks, loops, and request threads."""
     turn: Future[None] = Future()
     with _merge_content_tails_guard:
         previous = _merge_content_tails.get(key)
@@ -182,9 +181,27 @@ async def _content_turn(content: str):
     finally:
         if acquired:
             _complete_content_turn(key, turn)
-        else:
-            # Cancellation while queued must preserve ordering for later turns.
-            previous.add_done_callback(lambda _completed: _complete_content_turn(key, turn))
+
+
+@asynccontextmanager
+async def _content_turn(content: str):
+    """Serialize identical writes across tasks, loops, and request threads."""
+    key = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:_CONTENT_LOCK_KEY_HEX]
+    async with _keyed_turn(key):
+        yield
+
+
+@asynccontextmanager
+async def _quota_turn(name: str):
+    """Serialize a quota check-then-write so concurrent requests can't all pass
+    the same stale pre-check before either commits (pinned/importance TOCTOU).
+
+    Reuses the same cross-loop/cross-process lock-file machinery as
+    ``_content_turn`` — FastMCP may dispatch requests from different event
+    loops, so a plain ``asyncio.Lock`` here would not actually serialize them.
+    """
+    async with _keyed_turn(f"quota-{name}"):
+        yield
 
 
 def _push_warning_safe(code: str, msg: str) -> None:
@@ -434,7 +451,11 @@ async def check_pinned_quota() -> str | None:
 
 
 async def count_high_importance() -> int:
-    """统计 importance≥9 的非 pinned/protected 桶。失败时返回 0（不阻断写入）。"""
+    """统计 importance≥9 的非 pinned/protected/letter 桶。失败时返回 0（不阻断写入）。
+
+    letter 固定 importance=10（原文永久保留，不衰减不合并），不是"动态记忆抢到了
+    高重要度名额"，排除逻辑与 cascade_plan_resolved_to_buckets 里跳过
+    plan/letter 是同一个理由：letter 不参与这套配额博弈。"""
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
         return sum(
@@ -442,6 +463,7 @@ async def count_high_importance() -> int:
             if int(b.get("metadata", {}).get("importance") or 0) >= _HIGH_IMP_THRESHOLD
             and not b.get("metadata", {}).get("pinned")
             and not b.get("metadata", {}).get("protected")
+            and b.get("metadata", {}).get("type") != "letter"
         )
     except Exception as e:
         rt.logger.warning(f"count_high_importance failed: {e}")
@@ -666,6 +688,13 @@ async def _merge_or_create_inner(
                 return bucket["id"], True, ""
             except Exception as e:
                 rt.logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
+
+    if importance >= _HIGH_IMP_THRESHOLD:
+        # 权威判定放在真正落盘之前、加 quota 锁的窗口里：dispatch() 里那次
+        # enforce_high_importance_quota 发生在 analyze() 之前，两个并发请求
+        # 都可能拿到同一个「未满」快照——这里才是唯一决定是否越过硬上限的地方。
+        async with _quota_turn("high_importance"):
+            importance = await enforce_high_importance_quota(importance)
 
     bucket_id = await rt.bucket_mgr.create(
         content=content,
