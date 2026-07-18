@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from projection_mirror import TraceCatalogProjection
+from ombrebrain.projection.projection_mirror import TraceCatalogProjection
 
 
 _BODY_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")

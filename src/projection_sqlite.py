@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from projection_mirror import TraceCatalogProjection
+from ombrebrain.projection.projection_mirror import TraceCatalogProjection
 
 
 class TraceSQLiteProjection:
