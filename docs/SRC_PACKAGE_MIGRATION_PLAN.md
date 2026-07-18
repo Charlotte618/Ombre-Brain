@@ -57,6 +57,7 @@
 - [ ] `projection_*` 与 `ledger_*`（每个文件仍单独迁移）
   - [x] `ledger_property.py` → `ombrebrain/eventsourcing/ledger_property.py`
   - [x] `ledger_replay.py` → `ombrebrain/eventsourcing/ledger_replay.py`
+  - [x] `ledger_mirror.py` → `ombrebrain/eventsourcing/ledger_mirror.py`
   - [x] `projection_mirror.py` → `ombrebrain/projection/projection_mirror.py`
   - [x] `projection_sqlite.py` → `ombrebrain/projection/projection_sqlite.py`
   - [x] `projection_vector.py` → `ombrebrain/projection/projection_vector.py`

@@ -140,6 +140,13 @@ def test_ledger_replay_legacy_import_is_the_canonical_class():
     assert legacy_validator is LedgerReplayValidator
 
 
+def test_ledger_mirror_legacy_import_is_the_canonical_class():
+    from ledger_mirror import LedgerMirror as legacy_mirror
+    from ombrebrain.eventsourcing.ledger_mirror import LedgerMirror
+
+    assert legacy_mirror is LedgerMirror
+
+
 def test_projection_mirror_legacy_import_is_the_canonical_class():
     from projection_mirror import TraceCatalogProjection as legacy_projection
     from ombrebrain.projection.projection_mirror import TraceCatalogProjection
