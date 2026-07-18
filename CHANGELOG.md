@@ -2,6 +2,17 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.7.8
+
+### 维护 / Maintenance
+
+- 渐进整理 `src/` 根目录：将领域消息、计划历史、服务商识别、公开来源校验、部署模式、检索评分、媒体与备份存储、embedding outbox、ledger 及 projection 实现迁入 `ombrebrain/` 对应领域包；仓库内生产代码改用新的 canonical package 路径。
+- 旧的顶层 Python 导入路径暂时保留为轻量兼容壳。本版本开始计算三个正式版本的弃用观察期：`2.7.8`、`2.7.9`、`2.7.10` 保持兼容；最早在 `2.7.11` 经引用、文档、部署和完整回归审计后删除，不能仅按版本号自动移除。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.7.8`。
+
 ## 2.7.7
 
 ### 修复 / Fixed
