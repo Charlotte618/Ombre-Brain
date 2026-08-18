@@ -467,7 +467,33 @@ _MAX_METADATA_NODES = 10_000
 
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
-_VECTOR_RECALL_THRESHOLD = 0.65  # 纯语义候选进入结果池的最低余弦相似度
+# 纯语义候选进入结果池的最低余弦相似度。config.matching.vector_recall_threshold 可覆盖。
+#
+# 2026-08-18 从 0.65 下调到 0.55，依据是对 917 桶真实记忆的只读扫描：
+#
+#   阈值    平均新增/查询   双通道印证率   新增相似度中位
+#   0.65        0.1          100.0%         0.661   ← 旧值
+#   0.55        8.6           88.3%         0.566   ← 拐点
+#   0.50       55.1           69.0%         0.520
+#   0.45      170.8           60.6%         0.483
+#
+# 0.65 之下这条语义直通路**事实上不存在**：9 个宽泛查询一共只有 1 条桶能靠它
+# 进来，「我的工作」「同事」「情绪」全是 0。代码里写着 text_match or
+# semantic_match，但后一支从来不为真——OB 名义上是混合检索，实际是纯关键词检索。
+#
+# 原因是 semantic 权重只占 2.5/13.5≈18.5%：一条桶哪怕相似度 0.9，单靠这一维也
+# 只贡献约 16.7 分，离 fuzzy_threshold=50 差得远，必须同时在 topic（关键词重合）
+# 上得分才过得去。而「我的工作」这几个字根本不会字面出现在记忆里。
+#
+# 选 0.55 而不是更低：双通道印证率（新召回的桶里同时被关键词命中的比例）在这里
+# **不降反升**到 88.3%，说明捞回的是"关键词也认、只是加权分被七维稀释掉"的桶；
+# 再往下印证率单调劣化，0.45 时每查询涌进 170 条、印证率只剩 60%，那是拿噪音换召回。
+#
+# ⚠️ 已知弱点：印证率用"关键词也命中"当作"真的相关"的代理，而宽泛查询恰恰是
+# 关键词最不管用的场景——它能证明 0.45 是坏的，不能独立证明 0.55 是好的。
+# 0.55 最终由人工逐条看过新召回内容后确认（面试、薪资与配得感、上线那一刻的
+# 踏实感，都是该出现却一条都出不来的记忆）。调整前请重跑扫描，不要直接改数字。
+_VECTOR_RECALL_THRESHOLD = 0.55
 _RESOLVED_RANK_PENALTY = 0.3   # resolved 桶仅在排序时降权
 _LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文时的召回加分（修短查询召回）
 
@@ -521,6 +547,15 @@ class BucketManager:
         self.plan_dir = os.path.join(self.base_dir, "plans")
         self.letter_dir = os.path.join(self.base_dir, "letters")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
+        # 纯语义候选的门槛。见 _VECTOR_RECALL_THRESHOLD 上方的扫描依据。
+        try:
+            self.vector_recall_threshold = float(
+                config.get("matching", {}).get(
+                    "vector_recall_threshold", _VECTOR_RECALL_THRESHOLD
+                )
+            )
+        except (TypeError, ValueError):
+            self.vector_recall_threshold = _VECTOR_RECALL_THRESHOLD
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
         # --- Search scoring weights / 检索权重配置 ---
@@ -3635,10 +3670,33 @@ class BucketManager:
                 # Threshold check uses raw (pre-penalty) score so resolved buckets
                 # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
                 # remain reachable by keyword (penalty applied only to ranking).
+                # ⚠️ 已知设计债：这道门混了两类不同的东西。
+                #
+                # `normalized` 是七维加权和，其中 topic / bm25 / semantic 回答的是
+                # "这条记忆和查询有关吗"，而 emotion / time / importance / touch
+                # 回答的是"这条记忆本身怎么样"（新不新、重不重要、被摸过几次）。
+                # 两个问题被加成同一个分数，去过同一道门。
+                #
+                # 2026-08-18 对 917 桶真实记忆扫描过：相关性三维全为 0 却入选的
+                # 命中数是 **0**。但那是**算术上的巧合，不是设计上的保证**——
+                # 后四维权重合计 3.5/13.5，凑不满 fuzzy_threshold=50 而已。
+                # 这几个权重都在 config.scoring 里，谁把 time_weight 从 1.5 调到
+                # 4.0，门立刻就漏，而且是静默地漏：不报错、不变慢，只是开始返回
+                # "最近、很重要、但跟你问的完全无关"的记忆。
+                #
+                # 对的形状是把召回与排序分开：
+                #     门：  max(topic, bm25, semantic) >= 门槛   ← 只有相关性维度能开门
+                #     排序：现在这套七维加权分                    ← 后四维在这里发挥作用
+                # 一条相关的记忆因为更新、更重要而排前面完全合理；但它不该因为
+                # 新和重要就变得"相关"。
+                #
+                # 没有立刻改，是因为当前没有故障、且这是召回主路径；真要动需要先
+                # 攒一批带标准答案的查询（"我问了什么、期望返回什么"），否则无法
+                # 验证新门是不是把该召回的挡在了外面。见 docs/INTERNALS.md §3.1。
                 text_match = normalized >= self.fuzzy_threshold or literal_hit
                 semantic_match = (
                     semantic_score is not None
-                    and semantic_score >= _VECTOR_RECALL_THRESHOLD
+                    and semantic_score >= self.vector_recall_threshold
                 )
                 if text_match or semantic_match:
                     # Resolved buckets get ranking penalty (but still reachable by keyword)

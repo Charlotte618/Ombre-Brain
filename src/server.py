@@ -8,23 +8,22 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 16 个基础 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
-  trace/anchor/release/pulse/plan/letter_write/
-  letter_lock_update/letter_read/dream/feel/I；每个入口
+- 启动后暴露 16 个基础 MCP 工具：主连接器 `/mcp` 提供 13 个记忆工具，
+  `/mcp-extra` 提供 letter_write/letter_lock_update/letter_read；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
   breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
   复杂的工具，全塞一个 breath() 会导致它常年加载不上（见 issue #17）。
 - Dashboard / HTTP 路由全部已拆分到 src/web/<域>.py（每个模块 register(mcp)），
   本文件仅在启动时调用 web.register_all(mcp) 装配；共享依赖见 web/_shared.py
 - 仍保留在本文件：进程启动、引擎初始化、GitHub 后台同步循环、Webhook 推送、
-  MCP Bearer 鉴权中间件、单连接器 /mcp 装配、uvicorn 拉起
+  MCP Bearer 鉴权中间件、两个连接器装配、uvicorn 拉起
 
 不做什么（边界）：
 - 不在这里写 hold/breath/dream 等业务逻辑（全在 tools/* 下）
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp 单实例 + 16 个固定 @mcp.tool() 函数 + 可选 You；HTTP 路由在 src/web/*
+对外暴露：`mcp` 13 个记忆工具 + 可选 You，`mcp_extra` 3 个信件工具；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -329,9 +328,9 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP endpoint is externally reachable
 # stdio mode ignores host (no network)
 #
-# iter 2.2 后对外只有单连接器 /mcp。16 个基础工具全部直接注册到
-# 这一实例，不再依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
-# 稳定暴露完整工具清单。
+# 主连接器 /mcp 直接注册 13 个记忆工具；3 个信件工具注册到 /mcp-extra。
+# 两个实例都不依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
+# 稳定暴露各自的完整工具清单。
 #
 # 远程 Streamable HTTP 固定返回单个 JSON-RPC 对象，并且不要求客户端在
 # initialize 后保存/回传 Mcp-Session-Id。Kelivo 等会静默吞掉 tools/list 异常的
@@ -361,6 +360,23 @@ mcp = FastMCP(
     json_response=True,
     stateless_http=True,
     lifespan=_stdio_lifespan if config.get("transport", "stdio") == "stdio" else None,
+)
+
+# 第二个连接器：信件。
+#
+# 信是写给未来的东西——有收件人、有时间锁、到期才打开，时间方向和记忆相反。
+# 记忆指向已经发生的事，信指向还没发生的事；没人在大脑里写信。它是个好功能，
+# 只是不属于主连接器，占着工具位会让模型在该回忆的时候去翻信。
+#
+# `/mcp-extra` 在 2.8.5 起退役返回 404，3.2.0 恢复。stdio 传输下只有一个进程，
+# 两个实例共用同一套 tools 实现，差别只在对外挂在哪个端点。
+mcp_extra = FastMCP(
+    "Ombre Brain Extra",
+    host=_BIND_HOST,
+    port=OMBRE_PORT,
+    json_response=True,
+    stateless_http=True,
+    streamable_http_path="/mcp-extra",
 )
 
 
@@ -849,6 +865,9 @@ async def trace(
     deletion_request_id: Optional[str] = "",
     deletion_decision: Optional[str] = "",
     deletion_ai_reason: Optional[str] = "",
+    unlink: Optional[str] = "",
+    relink: Optional[str] = "",
+    relation_type: Optional[str] = "",
 ) -> str:
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
@@ -856,7 +875,7 @@ async def trace(
     importance=10。protected=1 保护记忆不被衰减，但不作为核心准则强制浮现；
     它与 pinned/anchor 互斥且同样锁定 importance=10。解除最后一层
     pinned/protected 保护时，必须在同一次调用显式传入 importance=1..10。
-    digested=1 标记已消化并从默认/被动浮现及 dream 隐藏，
+    digested=1 标记已消化并从默认/被动浮现及 dream 隐藏（对 pinned/permanent/anchor 桶不生效——核心准则与坐标系始终在场，要让某条安静请改用 trace(bucket_id, pinned=0)），
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
     两种方式都会重建 embedding，且不能同时使用。status/weight 用于 plan；dont_surface 控制日常浮现；
@@ -869,6 +888,14 @@ async def trace(
     trace(bucket_id="...", restore=True) 恢复；若历史归档同时带有 protected/anchor，
     只能用 restore=True、protected=0、importance=1..10 原子解除冲突后恢复。
     检索命中不会自动恢复。只传需要修改的字段，-1 或空串表示不改。
+
+    关系修正：桶间关系由后端在写入时自动建立，模型不需要也无法主动建立它们；
+    但发现连错了可以在这里改。unlink="目标id" 双向断开这一对的关联；
+    relink="目标id" 配合 relation_type=（caused_by / causes / continuation_of /
+    continues / related_to / same_event）把已存在关系改成正确的类型，对侧自动
+    取反向类型。改过的关系会被标记为手动关系，此后不再被自动推断改写或挤掉。
+    relink 不能凭空建立关系——两条记忆之间没有已存在的关系时会被拒绝。
+    这两个参数与其他字段更新互斥，请单独调用。
     """
     if deletion_request_id or deletion_decision:
         result = await deletion_requests.decide(
@@ -893,6 +920,7 @@ async def trace(
             hard_delete=hard_delete, delete_reason=delete_reason,
             restore=restore,
             old_str=old_str, new_str=new_str,
+            unlink=unlink, relink=relink, relation_type=relation_type,
         ),
         op="trace",
         args={
@@ -912,6 +940,7 @@ async def trace(
             "meaning_replace_count": len(meaning_replace or []),
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
+            "unlink": unlink, "relink": relink, "relation_type": relation_type,
         },
     )
 
@@ -1009,7 +1038,7 @@ async def plan(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_write(
     author: str,
     content: str,
@@ -1037,7 +1066,7 @@ async def letter_write(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_lock_update(
     letter_id: str,
     lock_type: str,
@@ -1060,7 +1089,7 @@ async def letter_lock_update(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -1120,8 +1149,14 @@ async def I(
 # 写工具甚至会在未应用客户端目标字段时仍创建记忆。breath 和 trace
 # 已有严格适配层，其余公开工具使用相同边界，并同步 FastMCP
 # 的发现 schema 缓存与运行时校验器。
-def _forbid_unknown_tool_arguments(tool_name: str) -> None:
-    public_tool = mcp._tool_manager.get_tool(tool_name)
+def _forbid_unknown_tool_arguments(tool_name: str, server: object = None) -> None:
+    """拒绝未知参数，并同步 FastMCP 的发现 schema。
+
+    ``server`` 指定工具注册在哪个连接器上。信件三工具自 3.2.0 起挂在
+    ``mcp_extra``（/mcp-extra），在主实例里查不到——严格校验必须跟着工具走，
+    否则 /mcp-extra 会成为一条参数拼错也照样"成功"的旁路。
+    """
+    public_tool = (server or mcp)._tool_manager.get_tool(tool_name)
     if public_tool is None:
         raise RuntimeError(f"registered {tool_name} tool is missing")
     arg_model = public_tool.fn_metadata.arg_model
@@ -1130,24 +1165,25 @@ def _forbid_unknown_tool_arguments(tool_name: str) -> None:
     public_tool.parameters = arg_model.model_json_schema()
 
 
-for _strict_tool_name in (
-    "breath_search",
-    "breath_advanced",
-    "hold",
-    "grow",
-    "dream",
-    "anchor",
-    "release",
-    "pulse",
-    "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
-    "feel",
-    "I",
+for _strict_tool_name, _strict_server in (
+    ("breath_search", mcp),
+    ("breath_advanced", mcp),
+    ("hold", mcp),
+    ("grow", mcp),
+    ("dream", mcp),
+    ("anchor", mcp),
+    ("release", mcp),
+    ("pulse", mcp),
+    ("plan", mcp),
+    # 信件在 /mcp-extra，严格校验跟着工具走。
+    ("letter_write", mcp_extra),
+    ("letter_lock_update", mcp_extra),
+    ("letter_read", mcp_extra),
+    ("feel", mcp),
+    ("I", mcp),
 ):
     try:
-        _forbid_unknown_tool_arguments(_strict_tool_name)
+        _forbid_unknown_tool_arguments(_strict_tool_name, _strict_server)
     except (AttributeError, RuntimeError, TypeError, ValueError) as _schema_exc:
         logger.warning(
             "%s strict-argument adapter unavailable: %s",
@@ -1156,8 +1192,8 @@ for _strict_tool_name in (
         )
 
 
-# You is the only dynamically exposed tool. The persisted switch is read after
-# all 16 baseline tools are registered, so the default-off surface is unchanged.
+# You is the only dynamically exposed tool. It lives on the 13-tool main
+# connector; the three letter tools on /mcp-extra remain unchanged.
 you_tool_gate = YouToolGate(mcp, _t_you.dispatch)
 try:
     you_tool_gate.sync(you_service.status().enabled)
@@ -1276,10 +1312,12 @@ if __name__ == "__main__":
             token_validator=_mcp_token_validator,
             lifecycle=_runtime_lifecycle,
             static_token_validator=_mcp_static_token_validator,
+            mcp_extra=mcp_extra,
         )
         if transport == "streamable-http":
             logger.info(
-                "MCP 单连接器 /mcp：16 个基础工具，You 按独立开关动态显隐"
+                "MCP /mcp：13 个记忆工具，You 按独立开关动态显隐；"
+                "/mcp-extra：3 个信件工具"
             )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
@@ -1314,12 +1352,12 @@ if __name__ == "__main__":
         elif _mcp_auth_required:
             logger.info("MCP OAuth middleware enabled / MCP OAuth 中间件已启用")
         else:
-            # 安全加固 #7：关掉鉴权 = /mcp 全裸奔，任何能连到端口的人都能读写全部记忆。
+            # 安全加固 #7：关掉鉴权 = 两个 MCP 端点全裸奔，任何能连到端口的人都能读写全部记忆。
             # 从 info 升级为显著 WARNING，避免用户无意识地把大脑暴露到公网。
             logger.warning(
                 "=" * 60 + "\n"
-                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    16 个基础记忆工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 与 /mcp-extra 无需任何令牌即可直连，\n"
+                "    16 个基础工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
@@ -1366,7 +1404,7 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio：16 个基础工具已直接注册在唯一 mcp 实例上，You 按独立开关显隐；启动成功边界由
+        # stdio：主实例提供 13 个记忆工具，You 按独立开关显隐；启动成功边界由
         # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
         # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
         _stdio_runtime_lifecycle = RuntimeLifecycle(

@@ -41,11 +41,12 @@
 - [x] 本地导出与 GitHub 备份显式包含 `.you` 数据并验证清单。
 - [x] 更新 README、INTERNALS、规格状态和测试契约。
 - [x] 运行针对性、全量 pytest 和更新清单检查。
-- [x] 2026-08-19 在隔离临时 vault 中启动真实 `streamable-http` 服务，完成 MCP `tools/list` 的 `16 → 17 → 16` 验收：只新增 `You`，其余工具 manifest 逐项不变；旧会话调用 `You` 被按未知工具拒绝；`mcp_require_auth` 保持不变。
-- [x] 2026-08-19 使用 `docker build --no-cache` 生成镜像 `ombre-brain:acceptance-20260819`（镜像 ID `b2e06a49b2f0`），从该镜像启动隔离容器；`/health` 返回 `ok`、`/api/version` 返回 `3.1.0`，启动日志无非预期错误。
+- [x] 2026-08-19 在隔离临时 vault 中启动真实 `streamable-http` 双连接器服务，完成 MCP `tools/list` 验收：主 `/mcp` 为 `13 → 14 → 13`，`/mcp-extra` 恒为 3，合计 `16 → 17 → 16`；只新增 `You`，其余工具 manifest 逐项不变；旧会话调用 `You` 被按未知工具拒绝；`mcp_require_auth` 保持不变。
+- [x] 2026-08-19 基于最新 `testing` 使用 `docker build --no-cache` 生成镜像 `ombre-brain:acceptance-testing-20260819`（镜像 ID `20b52b71d4a0`），从该镜像启动隔离容器；`/health` 返回 `ok`、`/api/version` 返回 `3.3.0`，启动日志无非预期错误。
 - [x] 2026-08-19 在真实 Dashboard 上完成桌面 `1440×900` 与移动 `390×844` 浏览器验收：页面无横向溢出，`You` 区域和开关完整可见，开关均可完成 `关闭 → 开启 → 关闭` 并持久化真实状态，浏览器控制台无应用错误。
-- 验证：备份归档专项测试 `35 passed`；全量 pytest（排除未提交暂存区与 `HEAD` 字节不同的
-  清单断言）`2291 passed, 97 skipped`；`deploy/gen_update_manifest.py --check` 通过。
-- 真实 MCP 验收结果：关闭态 16 个工具，开启态 17 个工具，关闭后恢复 16 个工具；新增集合仅为
-  `You`。提交后 `test_shipped_manifest_matches_repository_bytes` 已通过；无缓存 Docker 构建/启动及
+- 验证：备份归档专项测试 `35 passed`；合并后定向门禁 `156 passed, 90 skipped`；全量 pytest
+  （排除提交前无法读取合并结果 `HEAD` 字节的清单断言）`2341 passed, 99 skipped, 1 deselected`；
+  Ruff 与 `deploy/gen_update_manifest.py --check` 通过。
+- 真实 MCP 验收结果：关闭态合计 16 个工具，开启态 17 个工具，关闭后恢复 16 个工具；新增集合仅为
+  `You`。合并提交后 `test_shipped_manifest_matches_repository_bytes` 已通过；无缓存 Docker 构建/启动及
   Dashboard 桌面/移动端验收均已通过。

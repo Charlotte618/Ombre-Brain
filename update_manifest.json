@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "b2f44d3b6e29f8b1b73ea4735f006affc4d198e1fd9c7d50e736159b1ef636c6",
+      "sha256": "5eee6c0c5c6901f5e523f0a434bca4106e1ff7136deb451f982b0bb1a7b13716",
       "size": 6
     },
     {
@@ -42,8 +42,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "392aa8720e123bdb4aac6c677e15a72937cf297a5ad0975c77c1f2170a7a02de",
-      "size": 194226
+      "sha256": "07e3812fcb0422285740566d3006224676b9eae303f1bd973b277aeb221f83c7",
+      "size": 198450
     },
     {
       "path": "src/decay_engine.py",
@@ -557,8 +557,8 @@
     },
     {
       "path": "src/ombrebrain/policy/surfacing.py",
-      "sha256": "b541aa20871e6df531f1f0fbd91af5ee65a3cb2b6cac2318b08e68eeabc0fd64",
-      "size": 3768
+      "sha256": "023d8a26691196141beb7eadf53052561faf1b4abc6cf0224427580c58492eb9",
+      "size": 4893
     },
     {
       "path": "src/ombrebrain/policy/update_policy.py",
@@ -732,8 +732,8 @@
     },
     {
       "path": "src/ombrebrain/storage/relation_store.py",
-      "sha256": "066718c0eb2e8f261f2cd1cc2533e05655e4c41893f45baf087948cc3e28a2fc",
-      "size": 5711
+      "sha256": "a3b31e67340da8f9219adb925aac636a81d50f8dc3d1f164a2daf6cec9fd24d3",
+      "size": 12902
     },
     {
       "path": "src/ombrebrain/storage/source_store.py",
@@ -792,13 +792,13 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "c0777a548e2c2a8019115aaa8153454c0beb6143ad83e52fcf129bd24a2c632d",
-      "size": 66177
+      "sha256": "0cbbd6bc3d1175302a84d480ac40828a90752066b31b7a7d022ed915ab3d30b4",
+      "size": 68627
     },
     {
       "path": "src/server_app.py",
-      "sha256": "a1de491c62ace021038c516ef5919479cbac8c376d034d1bee6f03db25170592",
-      "size": 29181
+      "sha256": "c338a02e0674f6c5c3286352c663f6eba1eec31cf8d3f5b8b14b0e6af67240cb",
+      "size": 30723
     },
     {
       "path": "src/tools/__init__.py",
@@ -807,8 +807,13 @@
     },
     {
       "path": "src/tools/_common.py",
-      "sha256": "ba1198d30d2616d1eb1a2caf1590b4a558551fce4762ac4c3229f0f3a385b3f0",
-      "size": 63612
+      "sha256": "54c814a78f35ce54aa8a74e855b2a1f714e3e485e7a48c0eb4dcc9a13db67633",
+      "size": 64006
+    },
+    {
+      "path": "src/tools/_relation_link.py",
+      "sha256": "2dac03a87fca24bde7d9f8e99fa4c2c851ee8d67c380f54663e35ca101fca2df",
+      "size": 6984
     },
     {
       "path": "src/tools/_runtime.py",
@@ -862,13 +867,18 @@
     },
     {
       "path": "src/tools/dream/__init__.py",
-      "sha256": "7d729f32f1c29df75a7f20a9f00d614c2138be320c376fa695a817fd87aca3c2",
-      "size": 2928
+      "sha256": "549dd8bd706cb0b69d2ceee98369f858bc2adb594ea0b2f0b43832224c17f257",
+      "size": 2934
     },
     {
       "path": "src/tools/dream/candidates.py",
       "sha256": "852162fe4713631fd3c46b60177f6b8b51591389eb5abe69287cb5daa77b8511",
       "size": 4384
+    },
+    {
+      "path": "src/tools/dream/feel_rank.py",
+      "sha256": "9c078707a23774c3e0211448cb44bbf5bc29521069d330ce3a38434f5851772c",
+      "size": 4754
     },
     {
       "path": "src/tools/dream/hints.py",
@@ -877,8 +887,8 @@
     },
     {
       "path": "src/tools/dream/output.py",
-      "sha256": "6652ff2ecd2014e99efa9ba2c9ef7085cbcddb83e1005acc2dcad3e083243198",
-      "size": 22246
+      "sha256": "0f28353e341e54145757fb6ecd11587ac745f1a9bb31334e2326a1ddc7722f95",
+      "size": 22919
     },
     {
       "path": "src/tools/grow/__init__.py",
@@ -946,9 +956,14 @@
       "size": 488
     },
     {
+      "path": "src/tools/trace/_relation_edit.py",
+      "sha256": "738d08c02b1df9acae86749fdac914130d4790d6926ea15497afe68ac5ee273e",
+      "size": 7439
+    },
+    {
       "path": "src/tools/trace/core.py",
-      "sha256": "af1f9ada3601782a7d57c3cd6773a5df5a06bca004bec0c97888970276cc8b73",
-      "size": 31222
+      "sha256": "88ff1e6d9d3842305a1cacb5e556b906c3281f325237d0f34dd78c9196409e92",
+      "size": 32253
     },
     {
       "path": "src/tools/you/__init__.py",
@@ -1047,8 +1062,8 @@
     },
     {
       "path": "src/web/request_limits.py",
-      "sha256": "ab0a0f372e882d79a38681c4dca8be69fbffea6fcd5a3e485906f67fc2f2109d",
-      "size": 6405
+      "sha256": "544091a87613e7dd8374c5156cc6875651c4d6b70425cfe75b6ff64b6d516349",
+      "size": 6772
     },
     {
       "path": "src/web/search.py",
@@ -1082,5 +1097,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.1.0"
+  "version": "3.3.0"
 }

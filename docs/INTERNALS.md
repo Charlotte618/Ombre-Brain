@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；16 个基础薄封装直接注册到唯一公开实例，`YouToolGate` 按持久开关动态增减唯一可选工具；对外只暴露 **单连接器 `/mcp`**。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；13 个记忆工具注册到 `/mcp`，3 个信件工具注册到 `/mcp-extra`，`YouToolGate` 按持久开关在主连接器动态增减唯一可选工具。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。各域模块导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -266,12 +266,14 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（16 个基础工具 + 1 个可选工具）
+## 3. MCP 工具规格（16 个基础工具，分为 13 + 3；另有 1 个可选工具）
 
-> **单连接器（iter 2.2）**：16 个基础工具和可选 `You` 统一由连接器 `/mcp` 暴露。
-> 历史上（iter 2.1）曾拆成两个 FastMCP 实例。2.8.5 起删除历史容器；基础工具直接注册到唯一 `mcp`，`You` 按独立开关动态注册/移除。
+> **双连接器（3.2.0 起）**：`/mcp` 暴露 13 个记忆工具，`/mcp-extra` 暴露 3 个信件工具；
+> 可选 `You` 只在主连接器按独立开关动态注册/移除。
+> `/mcp-extra` 在 2.8.5–3.1.0 期间曾退役，3.2.0 起恢复，并与主连接器共享鉴权、体积限制和 CSRF 边界。
 > - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
-> - 低频 9 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
+> - 主连接器低频 6 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
+> - 信件连接器 3 个 —— `letter_write` / `letter_lock_update` / `letter_read`
 >
 > 3.0.0 删除了 source 回顾 4 个与 relation 4 个工具，见 §3.3.1。
 
@@ -298,6 +300,40 @@ feel 桶自身：
 3. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
 4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
 5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
+
+#### 检索的门：召回与排序目前没有分开（已知设计债）
+
+`BucketManager.search()` 里决定「一条桶进不进结果」的判定是：
+
+```
+text_match     = normalized >= fuzzy_threshold(50) or literal_hit
+semantic_match = semantic_score >= vector_recall_threshold(0.55)
+if text_match or semantic_match: 入选
+```
+
+`normalized` 是**七维加权和**，而这七维回答的是两个不同的问题：
+
+| 维度 | 回答的问题 | 权重 |
+|---|---|---|
+| topic / bm25 / semantic | **这条记忆和查询有关吗** | 4.0 / 1.5 / 2.5 |
+| emotion / time / importance / touch | 这条记忆本身怎么样 | 2.0 / 1.5 / 1.0 / 1.0 |
+
+两个问题被加成同一个分数去过同一道门。**一条与查询毫无关系但足够新、足够重要的记忆，理论上可以靠后四维凑够 50 分进入结果。**
+
+2026-08-18 对 917 桶真实记忆扫过：相关性三维全为 0 却入选的命中数是 **0**。但那是**算术上的巧合，不是设计上的保证**——后四维权重合计 3.5/13.5，最多贡献约 25.9 分，凑不满门槛而已。这几个权重都在 `config.scoring` 里可改，把 `time_weight` 从 1.5 调到 4.0，门立刻就漏，而且是**静默地漏**：不报错、不变慢，只是开始返回「最近、很重要、但跟你问的完全无关」的记忆。
+
+对的形状是把**召回**与**排序**分开：
+
+```
+门：  max(topic, bm25, semantic) >= 门槛   ← 只有相关性维度有资格开门
+排序：现在这套七维加权分                    ← 后四维在这里发挥作用
+```
+
+一条相关的记忆因为更新、更重要而排在前面完全合理；但它不该因为新和重要就变得「相关」。这样保证是**结构性**的：不管权重怎么调，无关的记忆都进不来——而今天靠的是「没人会乱调权重」，那不算保证。
+
+**为什么没有立刻改**：当前没有故障，而这是召回主路径；真要动需要先攒一批带标准答案的查询（「我问了什么、期望返回什么」），否则无法验证新门是不是把该召回的挡在了外面——只测「有没有泄漏」是不够的。
+
+**什么时候它会从隐患变成故障**：调了 `config.scoring` 里任何权重（尤其 time / importance）、或记忆库规模增长到非相关维度分布明显改变时。代码位置见 `src/bucket_manager.py` 的 `text_match` 判定处，那里有同样的注释。
 
 (实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；breath `max_tokens` 上限 40000（默认仍由 `surfacing.breath_max_tokens` 的 10000 fallback 控制，40000 只是显式 opt-in 的安全上限），`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
@@ -370,7 +406,7 @@ feel 桶自身：
 
 ### 3.4 `trace` — 修改/删除
 
-签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, protected=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", restore=False, old_str="", new_str=None)`
+签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, protected=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", restore=False, old_str="", new_str=None, unlink="", relink="", relation_type="")`
 
 - `delete=True` → `bucket_mgr.delete()`：写入 `deleted_at` 并将 Markdown 移入 `archive/`；只清理可重建的 embedding 索引，不抹除记忆文件。
 - `hard_delete=True` → 仅当桶在创建时带有 `provenance.kind=test` 与 `erasable=true` 才物理删除；真实记忆、后补字段及普通 Dashboard 路径均不得越过此边界。Dashboard 普通模式支持多选/当前筛选全选的沉底、主动遗忘和归档，开发者模式才显示测试桶永久删除入口。
@@ -394,6 +430,11 @@ feel 桶自身：
 - `meaning_append` 日常追加一条 meaning；`meaning_replace` 仅在纠错时整体替换。`media_append` / `media_replace` 同理管理持久媒体引用。
 - `hard_delete=True` 必须同时提供非空且不超过 500 字符的 `delete_reason`，不能与 `delete=True` 同时使用，且只接受创建时已标记为可擦除测试数据的桶；普通记忆与 plan 始终拒绝物理删除，拒绝时不会顺带归档。
 - **不暴露 `anchor` 字段**：anchor 切换必须走 `anchor()` / `release()` 工具（受 24 上限保护）。
+- `unlink` / `relink` + `relation_type` 修正后端自动建错的桶间关系（3.3.0）。两者互斥，且与其他字段更新互斥（走独立早返回分支，不参与 updates 收集）。
+  - `unlink="目标id"`：**双向物理移除**这一对关系，两侧各删一条。不是标成 `status="detached"`——3.0.0 删掉了 `relation_restore`，detached 会变成再也回不来的僵尸状态还白占 `MAX_RELATION_LINKS` 名额。删掉不会被重建：`link_new_bucket` 只在**新建桶**时触发推断，那一对桶不会再出生第二次。
+  - `relink="目标id", relation_type="related_to"`：改已存在关系的类型，对侧自动写入 `reverse_relation_type`（A `continuation_of` B ⇒ B `continues` A）。改过的关系**降级为手动关系**（去掉 `auto` / `score`），此后受 `merge_auto_links` 保护，不再被自动推断按相似度挤掉。
+  - **`relink` 不能凭空建立关系**：两侧都没有这条关系时明确拒绝。这是它与 3.0.0 删掉的 `relation_attach` 之间唯一的区别——「建立」仍然只归后端，理由见 `tools/_relation_link.py` 开头。
+  - 不支持 `custom`：custom 关系必须带 label，而 trace 没有传 label 的入口。单向残留（一侧有、另一侧没有）两种操作都能处理。
 
 (返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 
@@ -501,7 +542,7 @@ dream 侧配合（`src/tools/dream/hints.py` + `output.py`）：
 持久化位于 `<buckets_dir>/.you/you.sqlite3`。开关、Claim、Projection 与 content-free outbox
 在同一 SQLite 库中；普通桶提交后才登记 bucket ID/hash/revision，关闭期间不排队、不处理，
 重新开启也不回填此前历史。允许类别和证据门槛见 `docs/YOU_MODULE_SPEC.md` 与 ADR-0004。
-默认的 `docs/CLAUDE_PROMPT.md` 只描述 16 个基础工具，不预告关闭态的 `You`；开启后的发现以
+默认的 `docs/CLAUDE_PROMPT.md` 只描述分布在两个连接器上的 16 个基础工具，不预告关闭态的 `You`；开启后的发现以
 MCP `tools/list` / tool search 为准，确保关闭时模型侧也不可见。
 
 ---
@@ -578,7 +619,8 @@ MCP `tools/list` / tool search 为准，确保关闭时模型侧也不可见。
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器：16 个基础工具 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I**；独立开关开启时额外暴露 **You** |
+| `/mcp/*` | — | 公开 | FastMCP 主连接器：13 个记忆动作 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / **I**；独立开关开启时额外暴露 **You** |
+| `/mcp-extra` | — | 公开 | 第二个 FastMCP 实例：letter_write / letter_lock_update / letter_read。2.8.5 起退役返回 404，3.2.0 恢复。与 `/mcp` 共享同一套中间件（鉴权、体积限制、CSRF）——见 `web/request_limits.py` 的 `_MCP_ENDPOINT_PATHS` |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -1701,7 +1743,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，16 个基础工具固定注册，`You` 动态显隐）；URL 末尾必须 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；主 `/mcp` 固定 13 个记忆工具并动态显隐 `You`，`/mcp-extra` 固定 3 个信件工具；URL 末尾必须对应所需连接器路径 |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |

@@ -54,11 +54,11 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 ---
 
-## 16 个基础工具 + 可选 You / 16 Core Tools + Optional You
+## 16 个基础工具（13 + 3）+ 可选 You / 16 Core Tools (13 + 3) + Optional You
 
-16 个基础工具全部在**一个 MCP 连接器 `/mcp`** 上。`You` 默认关闭；只有在人类从 Ombre
-设置页打开唯一开关后，同一连接器才额外暴露一个只读 `You` 工具。这个开关不修改 MCP
-鉴权，也不改变其他工具。
+16 个基础工具分在两个 MCP 连接器：`/mcp` 提供 13 个记忆工具，`/mcp-extra` 提供 3 个信件工具。
+`You` 默认关闭；只有在人类从 Ombre 设置页打开唯一开关后，主连接器 `/mcp` 才额外暴露一个
+只读 `You` 工具。这个开关不修改 MCP 鉴权，也不改变任一连接器上的其他工具。
 
 ### 高频 7 个
 
@@ -69,7 +69,7 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 | `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。 |
 | `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
-| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；发现后端自动建的桶间关系连错了，用 `unlink` 双向断开、`relink`+`relation_type` 改类型；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
 ### 低频 9 个
@@ -241,9 +241,11 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现 16 个基础工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`。在 Ombre 设置页开启 `You` 后，同一连接器会额外出现 `You`。
+重启 Claude Desktop，工具列表里会出现主连接器的 13 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `I`。
 
-> 基础工具和可选 `You` 都使用同一连接器 `/mcp`，只配这一个即可。
+信件在**第二个连接器** `/mcp-extra` 上（`letter_write` / `letter_lock_update` / `letter_read`），要用的话在客户端里再加一条连接。写信是一个行为，不是一段记忆——它有收件人、有时间锁，时间方向和记忆相反，放在主连接器里会让模型在该回忆的时候去翻信。
+
+在 Ombre 设置页开启 `You` 后，主连接器 `/mcp` 会额外出现 `You`；`/mcp-extra` 的 3 个信件工具不变。
 
 ---
 
@@ -320,18 +322,20 @@ Claude.ai                    Ombre Brain 服务器
 
 #### 步骤 3：连接端点
 
-16 个基础工具与可选 `You` 全在**一个 MCP 端点 `/mcp`** 上：
+16 个基础工具分在两个 MCP 端点；可选 `You` 只属于主端点 `/mcp`：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_lock_update` `letter_read` `I`；开关开启时另有 `You` | 16 个基础工具 + 1 个可选工具 |
+| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `I`；开关开启时另有 `You` | 13 个记忆工具 + 1 个可选工具 |
+| `/mcp-extra` | `letter_write` `letter_lock_update` `letter_read` | 信件（3.2.0 起独立，2.8.5–3.1.0 期间该路径退役返回 404）|
 
-> 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。
+> `/mcp-extra` 在 2.8.5–3.1.0 期间曾退役并返回 `404`，3.2.0 起已恢复。
 
-在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
+在 Claude.ai / 你的客户端里先添加主连接器；需要信件能力时再添加第二条：
 
 ```
 http(s)://<你的地址>:18001/mcp
+http(s)://<你的地址>:18001/mcp-extra
 ```
 
 > **`<你的地址>` 填什么？**
@@ -862,7 +866,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 新用户最常踩、但文档里分散各处的点，集中提醒一下：
 
-- **只需加一个连接器 `/mcp`**：16 个基础工具和开关控制的可选 `You` 都在这一个端点上，不用再单独加别的。
+- **连接器按语义分两条**：`/mcp` 提供 13 个记忆工具和开关控制的可选 `You`；需要信件时再添加 `/mcp-extra` 的 3 个信件工具。
 - **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
 - **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。

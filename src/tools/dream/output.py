@@ -35,7 +35,7 @@ tools/dream/output.py — dream 最终输出格式化
 - 不做任何持久化写入
 - 不调 LLM
 
-对外暴露：format_dream_output(recent, all_buckets, window_hours,
+对外暴露：async format_dream_output(recent, all_buckets, window_hours,
                               connection_hint, crystal_hint) → str
 ========================================
 """
@@ -43,6 +43,7 @@ tools/dream/output.py — dream 最终输出格式化
 from .. import _runtime as rt
 from ..i import is_pending_candidate
 from ..plan.core import is_letter_bucket
+from .feel_rank import rank_feels
 from utils import count_tokens_approx, parse_bool, strip_wikilinks
 
 
@@ -183,7 +184,7 @@ def _format_self_review(
     return section, rendered_ids
 
 
-def format_dream_output(
+async def format_dream_output(
     recent: list,
     all_buckets: list,
     window_hours: int,
@@ -403,7 +404,11 @@ def format_dream_output(
                 (b.get("metadata") or {}).get("protected"), default=False
             )
         ]
-        feels_all.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+        # 3.2.0：从"最近写的 feel"改成"和这次在聊的事有关的 feel"。
+        # 基准是①段候选桶的合并文本——dream 本来就是在回顾这些桶。
+        reference_text = "\n".join(_content_of(b) for b in recent)[:20_000]
+        ranked, feel_vector_ok = await rank_feels(feels_all, reference_text)
+        feels_all = [feel for feel, _score in ranked]
         if feels_all:
             try:
                 feel_budget = int(surfacing_cfg.get("feel_max_tokens") or 15_000)
@@ -415,11 +420,18 @@ def format_dream_output(
                 dream_budget - count_tokens_approx(final_text),
             )
             feel_budget = min(feel_budget, remaining_budget)
+            degraded_note = (
+                ""
+                if feel_vector_ok
+                else "[检索降级：语义索引暂不可用，本段仅按关键词重合度排序。]\n"
+            )
             feel_header = (
-                "\n\n=== 你的 feel 历史（按最终渲染 token 预算）===\n"
-                "越新的 feel 优先保留全文；放不下时改为短摘录（末尾以「…」表示已截断）。\n"
-                "需要看未返回的 feel 可用 breath_advanced(query=..., domain=\"feel\") "
-                "或 trace 访问。\n\n"
+                "\n\n=== 和这次回顾相关的 feel（最多 5 条）===\n"
+                f"{degraded_note}"
+                "按与上面这些记忆的相关性挑选，不是按时间——所以这里没有的 feel "
+                "不代表不重要，只代表和这次聊的事没关系。\n"
+                "放不下时改为短摘录（末尾以「…」表示已截断）。\n"
+                "要按关键词找感受用 feel(query=...)。\n\n"
             )
             feel_lines: list[str] = []
             omitted = 0

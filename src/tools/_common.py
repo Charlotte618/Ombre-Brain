@@ -45,6 +45,7 @@ from utils import normalize_memory_title, now_iso, parse_bool
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
+from ._relation_link import link_new_bucket
 
 _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
@@ -1277,6 +1278,12 @@ async def _merge_or_create_inner(
         f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
         f"embedding_state={embedding_state}"
     )
+    # 自动建立桶间关系：fire-and-forget，写入返回不等它。
+    # 只在**新建**时触发——合并进已有桶时那条桶的关系已经建过了，
+    # 重复推断只会反复撞每桶上限。关系建不出来不影响记忆本身。
+    if not test_data:
+        asyncio.create_task(link_new_bucket(bucket_id, content))
+
     return bucket_id, False, embed_warn
 
 
