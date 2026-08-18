@@ -175,26 +175,29 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         request_id = 0
 
-        def mcp_request(method, params=None):
+        def mcp_request(method, params=None, path="/mcp"):
             nonlocal request_id
             request_id += 1
             response = client.post(
-                "/mcp",
+                path,
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
                 json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}},
             )
             assert response.status_code == 200, response.text
             return response.json()
 
+        # 信件自 3.2.0 起挂在 /mcp-extra：写信是一个行为，不是一段记忆。
+        # 这条用例验证的是"AI 通过 MCP 读信时看不到人类的私密信件"——
+        # 边界没变，只是换了端点。
         mcp_request("initialize", {
             "protocolVersion": "2025-03-26",
             "capabilities": {},
             "clientInfo": {"name": "letter-dashboard-audit", "version": "1"},
-        })
+        }, path="/mcp-extra")
         ai_read = mcp_request("tools/call", {
             "name": "letter_read",
             "arguments": {"limit": 20},
-        })
+        }, path="/mcp-extra")
         ai_read_text = ai_read["result"]["content"][0]["text"]
         assert "李四" in ai_read_text
         assert human_secret not in ai_read_text
