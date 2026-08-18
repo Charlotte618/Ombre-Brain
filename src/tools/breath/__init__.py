@@ -37,7 +37,7 @@ from .._common import (
 from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
-from .surface import surface_default
+from .surface import surface_default, surface_plans
 from .search import surface_search
 
 
@@ -131,9 +131,16 @@ async def dispatch(
         domain = "feel"
         tag_filter = [t for t in tag_filter if t not in ("feel", "__feel__")]
 
-    # --- Feel 通道优先：即使无 query 也直接拉 feel ---
+    # --- Feel 通道：3.0.0 起必须带关键词，不再全量返回（见 feel.py） ---
     if domain.strip().lower() == "feel":
-        return await _with_deletion_requests(await surface_feels(max_tokens=memory_max_tokens))
+        return await _with_deletion_requests(
+            await surface_feels(query=query, max_tokens=memory_max_tokens)
+        )
+
+    # --- Plan 通道：与 feel 同构。plan 不参与普通浮现，没有这个分流时
+    # domain="plan" 会落到下面的浮现模式，返回核心准则而不是 plan。 ---
+    if domain.strip().lower() == "plan":
+        return await _with_deletion_requests(await surface_plans(max_tokens=memory_max_tokens))
 
     # --- importance_min 模式：跳过语义，按 importance 降序 ---
     if importance_min >= 1:

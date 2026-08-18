@@ -30,14 +30,6 @@ EXPECTED_TOOLS = {
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
-    "source_attach",
-    "source_detach",
-    "source_restore",
-    "relation_read",
-    "relation_attach",
-    "relation_detach",
-    "relation_restore",
     "trace",
     "anchor",
     "release",
@@ -46,6 +38,7 @@ EXPECTED_TOOLS = {
     "letter_write",
     "letter_lock_update",
     "letter_read",
+    "feel",
     "I",
     "dream",
 }
@@ -55,14 +48,6 @@ EXPECTED_TOOL_ORDER = (
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
-    "source_attach",
-    "source_detach",
-    "source_restore",
-    "relation_read",
-    "relation_attach",
-    "relation_detach",
-    "relation_restore",
     "trace",
     "dream",
     "anchor",
@@ -72,6 +57,7 @@ EXPECTED_TOOL_ORDER = (
     "letter_write",
     "letter_lock_update",
     "letter_read",
+    "feel",
     "I",
 )
 
@@ -110,14 +96,6 @@ EXPECTED_TOOL_PROPERTIES = {
         "source_ranges",
     },
     "grow": {"content", "items", "test_data"},
-    "source_read": {"bucket_id", "expected_title", "scope", "cursor", "max_tokens", "source_slots", "all_sources"},
-    "source_attach": {"bucket_id", "expected_title", "source_content", "source_ranges"},
-    "source_detach": {"bucket_id", "expected_title", "source_slot"},
-    "source_restore": {"bucket_id", "expected_title", "source_slot"},
-    "relation_read": {"bucket_id", "expected_title", "include_titles", "include_detached"},
-    "relation_attach": {"bucket_id", "target_bucket_id", "relation_type", "expected_title", "label", "reverse_label"},
-    "relation_detach": {"bucket_id", "relation_slot", "expected_title"},
-    "relation_restore": {"bucket_id", "relation_slot", "expected_title"},
     "trace": {
         "bucket_id",
         "name",
@@ -159,6 +137,7 @@ EXPECTED_TOOL_PROPERTIES = {
     },
     "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
+    "feel": {"query", "max_tokens"},
     "I": {"content", "aspect", "read", "limit", "promote"},
     "dream": {"window_hours"},
 }
@@ -166,20 +145,13 @@ EXPECTED_TOOL_PROPERTIES = {
 EXPECTED_REQUIRED_PROPERTIES = {
     "breath_search": {"query"},
     "hold": {"content"},
-    "source_read": {"bucket_id", "expected_title"},
-    "source_attach": {"bucket_id", "expected_title", "source_content"},
-    "source_detach": {"bucket_id", "expected_title", "source_slot"},
-    "source_restore": {"bucket_id", "expected_title", "source_slot"},
-    "relation_read": {"bucket_id"},
-    "relation_attach": {"bucket_id", "target_bucket_id", "relation_type"},
-    "relation_detach": {"bucket_id", "relation_slot"},
-    "relation_restore": {"bucket_id", "relation_slot"},
     "trace": {"bucket_id"},
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
     "plan": {"content"},
     "letter_write": {"author", "content"},
     "letter_lock_update": {"letter_id", "lock_type"},
+    "feel": {"query"},
 }
 
 
@@ -380,33 +352,6 @@ def test_manifest_exposes_exactly_the_documented_23_tools(mcp_client):
     # Runtime compatibility with the old 9-argument schema is tested separately.
     assert tools_by_name["breath"]["inputSchema"].get("properties") == {}
 
-    relation_types = [
-        "caused_by",
-        "causes",
-        "continuation_of",
-        "continues",
-        "related_to",
-        "same_event",
-        "custom",
-    ]
-    relation_attach = tools_by_name["relation_attach"]
-    assert relation_attach["inputSchema"]["properties"]["relation_type"]["enum"] == relation_types
-    assert "bucket_id -> target_bucket_id" in relation_attach["description"]
-    assert all(name in relation_attach["description"] for name in relation_types)
-    assert "reverse_label" in relation_attach["description"]
-
-    relation_read = tools_by_name["relation_read"]
-    assert "include_detached=True" in relation_read["description"]
-    assert "include_titles=True" in relation_read["description"]
-    assert "不读取目标正文" in relation_read["description"]
-
-    relation_detach = tools_by_name["relation_detach"]
-    assert "不删除关系历史" in relation_detach["description"]
-    assert "relation_id" in relation_detach["description"]
-
-    relation_restore = tools_by_name["relation_restore"]
-    assert "relation_id" in relation_restore["description"]
-    assert "archived" in relation_restore["description"]
 
 
 @pytest.mark.parametrize(
@@ -417,14 +362,6 @@ def test_manifest_exposes_exactly_the_documented_23_tools(mcp_client):
         ("breath_advanced", {"catalog": {"not": "a boolean"}}, "catalog"),
         ("hold", {}, "content"),
         ("grow", {"items": {"not": "a list"}}, "items"),
-        ("source_read", {}, "bucket_id"),
-        ("source_attach", {}, "bucket_id"),
-        ("source_detach", {}, "bucket_id"),
-        ("source_restore", {}, "bucket_id"),
-        ("relation_read", {}, "bucket_id"),
-        ("relation_attach", {}, "bucket_id"),
-        ("relation_detach", {}, "bucket_id"),
-        ("relation_restore", {}, "bucket_id"),
         ("trace", {}, "bucket_id"),
         ("anchor", {}, "bucket_id"),
         ("release", {}, "bucket_id"),
@@ -452,14 +389,6 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
         ("breath_advanced", {}),
         ("hold", {"content": "unknown-field-probe", "test_data": True}),
         ("grow", {"items": []}),
-        ("source_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
-        ("source_attach", {"bucket_id": "unknown", "expected_title": "unknown", "source_content": "probe"}),
-        ("source_detach", {"bucket_id": "unknown", "expected_title": "unknown", "source_slot": 1}),
-        ("source_restore", {"bucket_id": "unknown", "expected_title": "unknown", "source_slot": 1}),
-        ("relation_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
-        ("relation_attach", {"bucket_id": "unknown", "expected_title": "unknown", "target_bucket_id": "target", "relation_type": "related_to"}),
-        ("relation_detach", {"bucket_id": "unknown", "expected_title": "unknown", "relation_slot": 1}),
-        ("relation_restore", {"bucket_id": "unknown", "expected_title": "unknown", "relation_slot": 1}),
         ("trace", {"bucket_id": "missing-unknown-field-probe"}),
         ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
         ("release", {"bucket_id": "missing-unknown-field-probe"}),
@@ -664,41 +593,6 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     assert "batch:g_" in result
     recalled = mcp_client.call("breath_search", {"query": marker, "max_results": 5})
     assert marker in recalled
-
-
-def test_grow_items_source_layer_requires_exact_title_and_reads_one_event(mcp_client):
-    marker = _marker("source-layer")
-    source = f"开场 {marker}\n妻子说 wife 喔，不是 girlfriend 喔。\n直接 wife。\n尾声"
-    result = mcp_client.call(
-        "grow",
-        {
-            "content": source,
-            "items": [{
-                "title": "wife",
-                "content": f"{marker} 她注意到我直接用了 wife。",
-                "tags": ["老婆", "称呼"],
-                "importance": 8,
-                "domain": ["恋爱"],
-                "source_ranges": [[2, 3]],
-            }],
-        },
-    )
-    bucket_id = list(re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", result))[-1]
-
-    denied = mcp_client.call(
-        "source_read",
-        {"bucket_id": bucket_id, "expected_title": "直接确认关系"},
-    )
-    assert "标题不匹配" in denied
-
-    event = mcp_client.call(
-        "source_read",
-        {"bucket_id": bucket_id, "expected_title": "wife", "scope": "event"},
-    )
-    assert "wife 喔" in event
-    assert "直接 wife" in event
-    assert "开场" not in event
-    assert "尾声" not in event
 
 
 def test_trace_updates_existing_memory_metadata(mcp_client):
@@ -956,7 +850,8 @@ def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
         ("grow", {"content": ""}, "内容为空"),
         ("trace", {"bucket_id": "missing-boundary-id"}, "missing-boundary-id"),
         ("anchor", {"bucket_id": "missing-boundary-id"}, "anchor"),
-        ("release", {"bucket_id": "missing-boundary-id"}, "释放失败"),
+        # 3.0.0：与 anchor 侧对称，改为第一人称并补标点。
+        ("release", {"bucket_id": "missing-boundary-id"}, "我没能把它移开"),
         ("plan", {"content": ""}, "内容为空"),
         ("letter_write", {"author": "", "content": "x"}, "author"),
         ("I", {"content": "x", "aspect": "prompt-injected"}, "aspect 无效"),

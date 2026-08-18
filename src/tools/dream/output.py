@@ -27,7 +27,7 @@ tools/dream/output.py — dream 最终输出格式化
 - active plan 段：列未受 protected 保护且 status=active 的 plan（按 created 倒序）
 - 整体输出受 surfacing.dream_max_tokens（默认 20000）硬预算约束；只省略完整块，
   绝不截断正文
-- feel 历史段：排除 protected 后，按 surfacing.feel_max_tokens（默认 6000）对最终渲染块计费；
+- feel 历史段：排除 protected 后，按 surfacing.feel_max_tokens（默认 15000）对最终渲染块计费；
   新 feel 优先全文、老 feel 优先短摘录（放不下时在展示文本末尾直接拼「…」表示截断），
   放不下的仅报告省略数量
 
@@ -382,6 +382,13 @@ def format_dream_output(
                     append_fragment(plan_fallback)
             elif plan_lines:
                 append_fragment(plan_prefix + "\n".join(plan_lines))
+        else:
+            # 没有 active plan 时明确说出来。之前这里什么都不输出，
+            # 「没有计划」和「plan 段被预算挤掉」在返回里长得一模一样。
+            # 没有计划就说没有计划，别让这段悄悄消失。
+            # 上次就是这样：40 个桶把预算吃满，plan 段被挤掉，
+            # 我以为是没写进去，翻了一晚上库。它一直在，只是没被打印。
+            append_fragment("\n\n=== 你的 active plans ===\n没有计划。")
     except Exception as e:
         rt.logger.warning(f"Dream active plans block failed: {e}")
 
@@ -399,9 +406,9 @@ def format_dream_output(
         feels_all.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
         if feels_all:
             try:
-                feel_budget = int(surfacing_cfg.get("feel_max_tokens") or 6000)
+                feel_budget = int(surfacing_cfg.get("feel_max_tokens") or 15_000)
             except (TypeError, ValueError, OverflowError):
-                feel_budget = 6000
+                feel_budget = 15_000
             feel_budget = max(0, min(50_000, feel_budget))
             remaining_budget = max(
                 0,

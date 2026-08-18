@@ -53,7 +53,7 @@ def _prepare_source_refs(
     """把 hold 可选原文挂到与 grow 共用的不可变 SourceStore。
 
     hold 是单桶写入：调用方提供原文但省略 ranges 时，整份原文默认就是
-    该桶的 event 证据。显式 ranges 仍使用 grow/source_read 的 1-based 闭区间。
+    该桶的 event 证据。显式 ranges 仍使用与 grow 一致的 1-based 闭区间。
     """
     source_text = "" if source_content is None else str(source_content)
     has_ranges = source_ranges not in (None, "", [])

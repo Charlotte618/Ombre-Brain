@@ -8,10 +8,9 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 23 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/source_read/
-  source_attach/source_detach/source_restore/relation_read/relation_attach/relation_detach/relation_restore/
+- 启动后暴露 16 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
   trace/anchor/release/pulse/plan/letter_write/
-  letter_lock_update/letter_read/dream/I；每个入口
+  letter_lock_update/letter_read/dream/feel/I；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
   breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
   复杂的工具，全塞一个 breath() 会导致它常年加载不上（见 issue #17）。
@@ -25,7 +24,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp 单实例 + 23 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：mcp 单实例 + 16 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -35,7 +34,7 @@ import logging
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, Awaitable, Literal
+from typing import Optional, Awaitable
 import httpx
 
 
@@ -65,10 +64,6 @@ from tools import _runtime as _tools_runtime
 from tools import breath as _t_breath
 from tools import hold as _t_hold
 from tools import grow as _t_grow
-from tools import source_read as _t_source_read
-from tools import source_bindings as _t_source_bindings
-from tools import relation_read as _t_relation_read
-from tools import relation_bindings as _t_relation_bindings
 from tools import trace as _t_trace
 from tools import anchor as _t_anchor
 from tools import plan as _t_plan
@@ -324,7 +319,7 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP endpoint is externally reachable
 # stdio mode ignores host (no network)
 #
-# iter 2.2 后对外只有单连接器 /mcp。当前 23 个工具全部直接注册到
+# iter 2.2 后对外只有单连接器 /mcp。当前 16 个工具全部直接注册到
 # 这一实例，不再依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
 # 稳定暴露完整工具清单。
 #
@@ -808,125 +803,6 @@ async def grow(
 
 
 @mcp.tool()
-async def source_read(
-    bucket_id: str,
-    expected_title: str,
-    scope: str = "event",
-    cursor: int = 0,
-    max_tokens: int = 6000,
-    source_slots: Optional[list[int]] = None,
-    all_sources: bool = False,
-) -> str:
-    """显式读取一个记忆桶对应的原文证据。必须给出精确 bucket_id 与 title；多 Source 默认只回 slot/ranges/status 清单，显式 source_slots 或 all_sources 才读活动原文。分页时保持同一桶、标题、scope 与 Source 选择。"""
-    return await _with_notice(
-        _t_source_read.dispatch(
-            bucket_id=bucket_id,
-            expected_title=expected_title,
-            scope=scope,
-            cursor=cursor,
-            max_tokens=max_tokens,
-            source_slots=source_slots,
-            all_sources=all_sources,
-        ),
-        op="source_read",
-        args={
-            "bucket_id": bucket_id,
-            "scope": scope,
-            "cursor": cursor,
-            "max_tokens": max_tokens,
-        },
-    )
-
-
-@mcp.tool()
-async def source_attach(bucket_id: str, expected_title: str, source_content: str, source_ranges: Optional[list[list[int]]] = None) -> str:
-    """给精确 bucket_id + title 的已有桶后补一份独立不可变 Source；只改证据绑定，不改正文、活跃度或生命周期。"""
-    return await _with_notice(_t_source_bindings.attach(bucket_id, expected_title, source_content, source_ranges), op="source_attach", args={"bucket_id": bucket_id})
-
-
-@mcp.tool()
-async def source_detach(bucket_id: str, expected_title: str, source_slot: int) -> str:
-    """断开一个稳定 Source slot，只停用本桶绑定，不删除共享 Source blob，也不改变桶生命周期。"""
-    return await _with_notice(_t_source_bindings.detach(bucket_id, expected_title, source_slot), op="source_detach", args={"bucket_id": bucket_id, "source_slot": source_slot})
-
-
-@mcp.tool()
-async def source_restore(bucket_id: str, expected_title: str, source_slot: int) -> str:
-    """恢复一个 detached Source slot 的原绑定；只恢复证据引用，不恢复 archived 桶。桶生命周期恢复请用 trace(..., restore=True)。"""
-    return await _with_notice(_t_source_bindings.restore(bucket_id, expected_title, source_slot), op="source_restore", args={"bucket_id": bucket_id, "source_slot": source_slot})
-
-
-RelationType = Literal[
-    "caused_by",
-    "causes",
-    "continuation_of",
-    "continues",
-    "related_to",
-    "same_event",
-    "custom",
-]
-
-
-@mcp.tool()
-async def relation_read(
-    bucket_id: str,
-    expected_title: str = "",
-    include_titles: bool = False,
-    include_detached: bool = False,
-) -> str:
-    """读取一个普通记忆桶的一跳 Relation ledger。bucket_id 是唯一必填定位；expected_title 只是可选标题 guard。默认只返回 active 关系；include_detached=True 才展开停用历史。include_titles=True 时才动态读取目标桶当前标题，始终不读取目标正文。返回的 relation_slot 是本桶稳定的管理 handle，供 relation_detach/relation_restore 使用。"""
-    return await _with_notice(
-        _t_relation_read.dispatch(bucket_id, expected_title, include_titles, include_detached),
-        op="relation_read",
-        args={"bucket_id": bucket_id},
-    )
-
-
-@mcp.tool()
-async def relation_attach(
-    bucket_id: str,
-    target_bucket_id: str,
-    relation_type: RelationType,
-    expected_title: str = "",
-    label: str = "",
-    reverse_label: str = "",
-) -> str:
-    """在两个普通记忆桶之间建立一跳、天然双向的 Relation；bucket_id/target_bucket_id 直接按 ID 定位，expected_title 只是可选 guard。relation_type 始终从 bucket_id -> target_bucket_id 的视角选择：caused_by=目标是当前桶的原因；causes=目标是当前桶的结果；continuation_of=目标是当前桶的前段；continues=目标是当前桶的后续；related_to=相关；same_event=同一事件；custom=自定义。固定六型会自动在目标端生成反向语义且不能自定义 label；custom 必须提供 label，reverse_label 可选，留空时反向端复用 label。"""
-    return await _with_notice(
-        _t_relation_bindings.attach(
-            bucket_id,
-            target_bucket_id,
-            relation_type,
-            expected_title,
-            label,
-            reverse_label,
-        ),
-        op="relation_attach",
-        args={"bucket_id": bucket_id, "target_bucket_id": target_bucket_id},
-    )
-
-
-@mcp.tool()
-async def relation_detach(bucket_id: str, relation_slot: int, expected_title: str = "") -> str:
-    """按本桶 relation_slot 原位停用 Relation，不删除关系历史；expected_title 只是可选 guard。带 relation_id 的新式双向 Relation 会同步停用另一端镜像，默认 relation_read 与自动 hint 隐藏 detached；旧版无 relation_id 的单向关系只修改本端。"""
-    return await _with_notice(
-        _t_relation_bindings.detach(bucket_id, relation_slot, expected_title),
-        op="relation_detach",
-        args={"bucket_id": bucket_id, "relation_slot": relation_slot},
-    )
-
-
-@mcp.tool()
-async def relation_restore(bucket_id: str, relation_slot: int, expected_title: str = "") -> str:
-    """按本桶 relation_slot 恢复一个 detached Relation；expected_title 只是可选 guard。带 relation_id 的新式双向 Relation 会同步恢复另一端镜像，旧版无 relation_id 的单向关系只恢复本端；本工具只恢复关系状态，不恢复 archived 记忆桶的生命周期。"""
-    return await _with_notice(
-        _t_relation_bindings.restore(bucket_id, relation_slot, expected_title),
-        op="relation_restore",
-        args={"bucket_id": bucket_id, "relation_slot": relation_slot},
-    )
-
-
-@mcp.tool()
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
@@ -1191,6 +1067,19 @@ async def letter_read(
 
 
 @mcp.tool()
+async def feel(
+    query: str,
+    max_tokens: Optional[int] = 0,
+) -> str:
+    """按关键词找回我以前留下的感受。query 必填——feel 不是列表，是「我此刻在想的这件事，我以前怎么感受的」，先说在想什么才知道该翻哪一段。关键词走向量检索（候选限定在 feel 桶内，相似度 >= 0.65 才算命中），同一件事换个说法也能找回；向量不可用时退回关键词字面匹配并明确提示降级。命中后逐字返回完整正文，不截断、不摘要、不调 LLM；不返回未命中的 feel，也不用低相关的凑数。写入感受仍用 hold(content=..., feel=True, source_bucket=...)。"""
+    return await _with_notice(
+        _t_breath.surface_feels(query=query, max_tokens=max_tokens or 10000),
+        op="feel",
+        args={"query": query, "max_tokens": max_tokens},
+    )
+
+
+@mcp.tool()
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -1230,14 +1119,6 @@ for _strict_tool_name in (
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
-    "source_attach",
-    "source_detach",
-    "source_restore",
-    "relation_read",
-    "relation_attach",
-    "relation_detach",
-    "relation_restore",
     "dream",
     "anchor",
     "release",
@@ -1246,6 +1127,7 @@ for _strict_tool_name in (
     "letter_write",
     "letter_lock_update",
     "letter_read",
+    "feel",
     "I",
 ):
     try:
@@ -1355,7 +1237,7 @@ if __name__ == "__main__":
             static_token_validator=_mcp_static_token_validator,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：23 个工具统一对外暴露")
+            logger.info("MCP 单连接器 /mcp：16 个工具统一对外暴露")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
@@ -1394,7 +1276,7 @@ if __name__ == "__main__":
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    23 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    16 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
@@ -1441,7 +1323,7 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio：23 个工具已直接注册在唯一 mcp 实例上；启动成功边界由
+        # stdio：16 个工具已直接注册在唯一 mcp 实例上；启动成功边界由
         # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
         # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
         _stdio_runtime_lifecycle = RuntimeLifecycle(

@@ -2,10 +2,86 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
-### 未发布 / Unreleased
+## 3.0.0
 
+> 主版本号从 2.x 跳到 3.0.0：这一版删掉了 8 个公开 MCP 工具、改变了 `feel` 的调用契约
+> （从「全量返回」变成「必须带关键词」），对已经在用 2.x 的客户端是**破坏性变更**。
+> 上一个发布版本是 2.17.11；开发过程中曾用 2.18.0 作为内部版本号，从未发布。
+
+### 许可与项目文件 / Licensing & Project Files
+
+- **许可证仍为 [MIT](LICENSE)，`LICENSE` 文件未变。** 但清掉了一处长期存在的自相矛盾：此前 `LICENSE` 写 MIT（允许一切），`LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md` 却写「商业托管/转售需书面许可」（禁止商业），两份文件说的话相反，想认真用的人读不懂哪份算数，反而不敢用。
+  - `LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md` 改名为 [`NOTICE.md`](NOTICE.md) 并重写：不再是限制性条款，而是一份**没有法律约束力的请求** —— 保留出处、以及如果拿它做记忆服务，请让用户能随时完整导出自己的记忆。文件里明确写了「这不是条款，MIT 说了算，你完全可以不理会」。原 v2.4.0 内容折叠保留为历史记录，并注明其中的商业限制从未生效。
+  - README 顶部引用该 notice 的提示块已删除，License 段重写为 MIT 的实际含义 + 指向 `NOTICE.md` 和 `AUTHORS.md`。
+  - **为什么不改成 AGPL**：曾评估过 AGPL-3.0（能解决「改名转售且不公开改动」的问题），但对一个希望被自由使用的个人项目而言，AGPL 的传染性会挡住相当一部分正当使用者。「禁止商业使用」这类限制既挡不住真想绕的人，又劝退了本来会守规矩的人 —— 真正想要的从来不是控制权，所以改为把期望写在明处、不写进协议。
+- **新增 [`AUTHORS.md`](AUTHORS.md) 致谢文件。** 记录开发组成员；README 顶部致谢行加上指向链接。
+- **新增 DCO（Developer Certificate of Origin）与贡献指南。** 根目录新增 [`DCO`](DCO)（1.1 官方全文，逐字取自 developercertificate.org）、[`CONTRIBUTING.md`](CONTRIBUTING.md)，以及 `.github/PULL_REQUEST_TEMPLATE.md`。
+  - 提交时加 `-s`（`git commit -s`）自动附上 `Signed-off-by:` 行，即为签署。
+  - **DCO 不转让著作权** —— 贡献者写的代码依然属于贡献者，签署只声明「这段代码我有权提交」。与 CLA 的区别在于 DCO 不授予项目方再许可（sublicense）的权利，因此不构成商业双授权的基础。
+  - 选 DCO 而不是 CLA，是因为它对贡献者零摩擦、社区接受度高。代价是将来若需改变许可条款，仍须逐个联系历史贡献者取得同意。
 - 修复 `grow` 在脱水拆分耗时超过 MCP/客户端等待时间时出现“前端报失败、服务端仍已写入”，随后重试又生成重复记忆的问题。首个任务不再随调用方断开而取消；同一请求在短时间内重试时会复用进行中的任务或已完成结果，不再重复写入。真实失败不会缓存，之后仍可正常重试。
 - Dashboard 普通桶详情合并「归档」与「删除到档案」的人类入口：现在只显示「归档」，要求填写理由并进入 AI 审批；批准后沿用删除到档案语义写入 `deleted_at`。AI/系统内部的普通 `archive()` 与自动衰减行为保持不变。
+
+### 删除 / Removed
+
+- **工具精简：公开 MCP 工具从 23 个减到 15 个。** 工具数量本身会伤害可用性——claude.ai 在工具过多时改用 tool_search 延迟加载，按描述搜工具、命中带随机性；每个工具的 schema 与说明也都要占上下文。留下的每个工具都应该是不可替代的动作，同一动作的不同状态切换不该各占一个工具位。
+- **删除原文回顾的四个工具**：`source_read` / `source_attach` / `source_detach` / `source_restore`。原文证据层从此**只写不读**，模型没有任何回读入口，也无法后补或停用绑定。
+  - `hold(source_content=...)` 与 `grow(content=共享原文, items=[...])` 的写入路径不变，原文照常按 SHA-256 内容寻址存进 `_sources/`，照常进入本地备份与 GitHub 同步。保留原文是为了备份与导出的完整性，不是为了让模型回忆。
+  - ⚠️ **[ADR-0001](docs/adr/ADR-0001-source-evidence-layer.md) 中「`source_read` 是唯一公开读取入口」这句话已被本次变更取代**——现在是「无公开读取入口」。ADR 作为历史决策记录保持原样不改，当前行为以本条目与 `docs/INTERNALS.md` §3.3.1 为准。
+  - `breath` 与目录模式不再输出 `[source_available:true | ... | use:source_read]` 提示。不提示一个已不存在的入口，避免模型反复尝试调用已删除的工具。
+- **删除关系管理的四个工具**：`relation_read` / `relation_attach` / `relation_detach` / `relation_restore`。建立桶间关系是后端的活，不该占用模型的工具位和判断力。
+  - **读取侧不受影响**：`relation_hint()` 仍在 `breath` / 目录模式 / `dream` 三处被后端消费，存量关系照常展示。
+  - ⚠️ **写入侧当前是空的**：删掉 `relation_attach` 后没有任何入口能建立新关系，`relation_store` 暂时只有存量数据。后端自动建立尚未接线，接线前不会产生新关系。
+
+### 新增 / Added
+
+- **`feel(query)` 成为独立 MCP 工具，且不再全量返回。** 此前只能通过 `breath_advanced(domain="feel")` 读取，且会把所有 feel 按时间倒序倒出来。
+  - **`query` 必填**：feel 回答的是「我此刻在想的这件事，我以前怎么感受的」，不是一份可以整本翻的列表。feel 越攒越多时，无差别倒出既挤占上下文，也让这个真实问题淹没在时间序列里。
+  - 关键词走向量检索：`search_similar(query, allowed_bucket_ids=<全部 feel 桶>)` 把候选限定在 feel 内，相似度 **≥ 0.65**（与 `breath_search` 向量通道同一门槛）才算命中；排序先按相似度、再按时间倒序。
+  - 向量不可用或异常时退回关键词字面匹配，并在返回首行明确提示降级。
+  - 命中后逐字返回，不摘要不截断；未命中的一律不返回，也不用低相关的凑数。不给 query 时返回说明与示例，而不是倒出全部。
+  - `breath_advanced(domain="feel")` 与 `tags="feel"` 作为等价老路径保留，同样要求关键词。
+  - ⚠️ `surfacing.feel_max_tokens` 自此**只作用于 dream 的 feel 历史段**；`feel` 工具用自己的 `max_tokens`（默认 10000），且放不下时整条省略而非折叠成摘要。
+  - 公开工具数 15 → 16。**普通 `breath()`、`breath_search`、`importance_min` 三条路径均不返回 feel**（已实测：用 feel 正文中的独特词检索、以及 importance=10 的 feel 都无法命中）；catalog 目录模式仍会列出 feel 分区的元数据行（不含正文）。
+- **`timezone` 成为一级配置项**（`config.yaml`，默认 `Asia/Shanghai`，Dashboard「设置」可改）。用户只给日期、不写时区时按它理解。
+  - Letter 定时锁此前要求 `unlock_date` **必须带时区**（`2027-01-01` 直接被拒，只接受 `2027-01-01T00:00:00+08:00`），而 `breath_search` 的 `date_from/date_to` 却支持纯日期——同一个系统两套时间约定。现在纯日期与无时区时刻都按配置时区解释，显式带时区仍然优先。
+  - 时区名非法或运行环境缺少 IANA tzdata 时回退固定 `+08:00`，不让「解析一个日期」抛异常；但 Dashboard 保存时会**当场校验并拒绝**非法时区，避免用户以为设置成功、实际每次都在静默回退。
+  - `normalize_unlock_date` 的四条报错全部中文化，并给出可照抄的正确写法。
+
+### 修复 / Fixed（返回格式）
+
+- **`grow(items=[...])` 新建时返回 bucket_id 而不是标题**，而 `grow(content=...)` 返回标题。调用方拿到 12 位 hex 无法确认存进去的是什么，得再查一次目录。两条路径现已一致（标题正确落库，只是返回没用它）。
+- **`trace(hard_delete=True)` 在桶不存在时返回英文错误码** `永久删除失败: not_found`（另外三个错误分支都有中文文案，只有这个漏了）。
+- **`anchor` 失败文案缺标点**：`我没能把它锚住。找不到该记忆桶 当前 anchor: 0/24。` → `我没能把它锚住：找不到该记忆桶。当前 anchor: 0/24。`；`release` 的 `释放失败。` 一并改为与之对称的第一人称。
+- **Dashboard 里 `feel_max_tokens` 的前端默认值仍是 6000**，与后端调整后的 15000 不一致。
+
+### 保留 / Unchanged
+
+- `ombrebrain/storage/source_store.py` 与 `ombrebrain/storage/relation_store.py` 一行未改。删的是模型能调用的动作，不是数据本身。
+- 存量 `source_links` 的 detached 项、存量 relation 数据全部原样保留。
+
+### 修复 / Fixed
+
+- **`breath_advanced(domain="plan")` 返回核心准则而不是 plan。** `domain` 参数原本只在 catalog 模式和「有 query 的检索模式」里生效；plan 桶又被普通浮现排除。不带 query 调用时会直接落到浮现模式，于是返回权重最高的桶 + 置顶核心准则。叠加 dream 末尾 plan 段可能因总预算降级成只报条数，**plan 的正文一度没有任何读取入口**——只能看到「3 条」这个数字，内容一条都读不到。
+  - 新增 Plan 通道（`tools/breath/surface.py: surface_plans()`），与既有 Feel 通道同构：`domain="plan"` 直接拉所有 `type==plan && status==active` 桶，按 `created` 倒序逐字返回，不截断不摘要，已 resolved/abandoned 的不返回。**没有新增工具**，只补了一条 domain 分流。
+  - 回归测试见 `tests/test_breath_plan_channel.py`，四条断言覆盖：正文可读、不返回核心准则、排除非 active、不调用 LLM。
+- **dream 里「没有计划」和「plan 段被预算挤掉」长得一模一样。** 没有 active plan 时 plan 段整段静默消失，无法与降级区分。现在会明确输出「没有计划。」。
+- **dream 的 feel 历史段预算从 6000 提到 15000**（`surfacing.feel_max_tokens`）。原值下 feel 很容易被折叠成 40 字摘录。⚠️ 该项若已在 `config.yaml` 中显式设置，以配置值为准，改默认值不生效。
+- **Docker 部署下 `AI_NAME` 实际设不上。** `.env.example` 写明可以设，但 `deploy/docker-compose.yml` 的 environment 段从未透传它，而 `get_ai_name()` 只读环境变量——**后果是带锁 Letter 在 Docker 上完全无法创建**（报「未能从现有 ai_name / AI_NAME / author 中取得当前写信人的实际关系名」）。
+  - `ai_name` 现在是 `config.yaml` 的一级配置项，**优先级高于环境变量**：config 随 vault 持久化，容器重建/重启都不丢。默认留空表示「没配」，回退环境变量、再回退 `"AI"`，与旧行为一致。
+  - `get_ai_name()` 按 config 文件 mtime 缓存（它在一次 letter 请求里会被调用多次），改完配置立即生效、无需重启；配置缺失或损坏时静默回退而不抛异常——署名逻辑遍布 letter/prompt/Dashboard，不能因为配置坏掉就整条链路崩。
+  - `deploy/docker-compose.yml` 一并补上 `AI_NAME` 透传，让 `.env` 里的设置也能生效。
+- **`entrypoint.sh` 播种日志里的代码目录路径被 shell 吞掉。** 第 242 行 `播种代码到持久卷 $CODE_DIR：$RESEED_REASON` 中，`$CODE_DIR` 后面紧跟的全角「：」是多字节字符，shell 把它的首字节当成变量名的一部分，转而展开一个不存在的变量——**路径整个丢失**，并向 stdout 吐出半个字符（非法 UTF-8）。改用 `${CODE_DIR}` 明确边界。
+  - 后果不止是日志难看：运维看不到代码播种到哪个目录；`subprocess(text=True)` 读取启动输出时直接抛 `UnicodeDecodeError`，`tests/test_entrypoint_code_bootstrap.py` 中 4 个用例因此长期失败。修复后这 4 项全部转绿。
+- **镜像缺 `docs/adr/`、`tools/`、`kernel/`，三项系统诊断在任何 Docker 部署上恒红**（`adr_requirements` 报 docs/adr not found、`preflight_cli_diagnostics` 报 missing_files、`vnext_preflight` 的 `rust_kernel_scaffold` 契约失败）。
+  - `.dockerignore` 放行这三处、`Dockerfile` 补 COPY。
+  - `entrypoint.sh` 的播种清单同步扩展：新增可选目录 `SEED_DIRS_OPTIONAL="docs tools kernel"`。此前只播种 `src/`、`frontend/` 与三个 root 文件，而诊断读的是播种目标 `<vault>/_app`，因此光进镜像并不生效。可选目录一律「存在才处理」，老镜像缺失时不阻断启动；换代播种、失败回退与崩溃回滚（`_prev`）三条路径都同步覆盖，回滚后运行时树与回滚点保持一致，不残留新镜像带来的目录。
+  - 修复后 `preflight_cli_diagnostics` 与 `vnext_preflight`（28 项全通过）转绿。
+  - ⚠️ **`adr_requirements` 仍为 error，但原因已不同**：目录现在能读到了，暴露出 `docs/adr/ADR-0003-unified-human-archive-entry.md` 自身缺 6 个必需边界章节（`Why this is not cognition`、`Why this is not a database feature`、`How forgetting still works`、`How tombstones are preserved`、`How present thinking remains with the LLM`、`Rejected alternatives`）。ADR-0001/0002 均合格。该文档需由其作者补齐，本次未改动。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `3.0.0`。
 
 ## 2.17.11
 

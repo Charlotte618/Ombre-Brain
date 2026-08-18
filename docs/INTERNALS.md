@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；15 个薄封装全部以 `@mcp.tool()` 直接注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；16 个薄封装全部以 `@mcp.tool()` 直接注册到唯一公开实例；对外只暴露 **单连接器 `/mcp`**。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。从旧 server.py 巨石里拆出的 16 个域模块，每个导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -238,7 +238,7 @@ hold / grow（Claude 决策）
 ```
 1. breath()                — 必须。浮现未解决记忆
 2. dream()                 — 可选。你或用户觉得需要消化时再调
-3. breath(domain="feel")   — 可选。想读 feel 时再调
+3. feel(query="关键词")     — 可选。想起某件事、想知道自己以前怎么感受时再调
 4. 开始和用户说话
 ```
 
@@ -259,18 +259,20 @@ hold(feel=True, source_bucket="xxx", valence=0.45)
 feel 桶自身：
   - calculate_score() 固定返回 50.0，永不归档
   - 普通 breath 不浮现（被 type 过滤）
-  - 只通过 breath(domain="feel") 或 breath(tags="feel"/"__feel__") 读取
+  - 只通过 feel(query=...) 读取（breath(domain="feel") 是等价老路径，同样要求关键词）
   - 仍参与 dream 的结晶化检测（>0.7 相似度且 ≥3 条 → 提示升级为 pinned）
 ```
 
 ---
 
-## 3. MCP 工具规格（共 19 个）
+## 3. MCP 工具规格（共 16 个）
 
-> **单连接器（iter 2.2）**：当前 19 个工具统一由连接器 `/mcp` 暴露。
-> 历史上（iter 2.1）曾拆成两个 FastMCP 实例。2.8.5 起删除历史容器，当前 19 个工具全部直接注册到唯一 `mcp`。
-> - 高频 8 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream`
-> - 低频 11 个 —— `source_attach` / `source_detach` / `source_restore` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
+> **单连接器（iter 2.2）**：当前 16 个工具统一由连接器 `/mcp` 暴露。
+> 历史上（iter 2.1）曾拆成两个 FastMCP 实例。2.8.5 起删除历史容器，当前 16 个工具全部直接注册到唯一 `mcp`。
+> - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
+> - 低频 9 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
+>
+> 3.0.0 删除了 source 回顾 4 个与 relation 4 个工具，见 §3.3.1。
 
 ### 3.1 `breath` / `breath_search` / `breath_advanced` — 检索/浮现
 
@@ -280,12 +282,21 @@ feel 桶自身：
 - **`breath_search(query, domain="", max_results=0)`** — 3 参数。等价于 `dispatch(query=query, domain=domain, max_results=max_results)`，即下面的「检索模式」。按关键词/语义找记忆时用。
 - **`breath_advanced(query="", max_tokens=0, domain="", valence=-1, arousal=-1, max_results=0, importance_min=-1, tags="", catalog=False)`** — 完整 9 参数，历史上单一 `breath` 工具的全部能力（`catalog` 目录模式 / `tags` 过滤 / `importance_min` 批量模式 / `valence`/`arousal` 情感检索 / `max_tokens` 预算）都保留在这里，供需要精细控制的场景用。
 
-`dispatch()` 内部四种模式（按判定顺序，仅 `breath_advanced` 能触达全部四种；`breath()`/`breath_search()` 分别固定落在模式 3 / 模式 4）：
+`dispatch()` 内部五种模式（按判定顺序，仅 `breath_advanced` 能触达全部五种；`breath()`/`breath_search()` 分别固定落在模式 4 / 模式 5）：
 
-1. **Feel 通道**（`domain="feel"` 或 `tags` 含 `"feel"`/`"__feel__"`，仅 `breath_advanced`）：直接拉所有 `type==feel` 桶，按 `created` 倒序展示原文，按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算；**超出预算的旧 feel 折叠为 60 字符单行摘要**，并在末尾追加 `更早的 feel 摘要（N 条，已折叠）` 段。**不排除 anchor 桶**（设计：feel 通道只看 type=feel）。
-2. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
-3. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
-4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
+1. **Feel 通道**（独立工具 `feel(query=...)`；`breath_advanced(domain="feel")` 与 `tags="feel"/"__feel__"` 是等价老路径）：**3.0.0 起必须带关键词，不再全量返回**。
+   - 关键词走向量检索：`embedding_engine.search_similar(query, allowed_bucket_ids=<全部 feel 桶 id>)` 把候选限定在 feel 内，相似度 **>= 0.65**（与 `breath_search` 向量通道同一门槛）才算命中。
+   - 向量不可用或抛异常时退回关键词字面匹配，并在返回首行输出 `[检索降级：语义索引暂不可用，本次仅按关键词字面匹配。]`。
+   - 排序：先按相似度，再按 `created` 倒序——同样相关时新的感受更接近现在。
+   - 命中后逐字返回完整正文，不截断、不摘要、不调 LLM；未命中的 feel 一律不返回，也不用低相关的凑数。
+   - 不给 query 时返回一句「feel 需要一个关键词」的说明并给出示例，不再倒出全部。
+   - **不排除 anchor 桶**（设计：feel 通道只看 type=feel）。
+   > 为什么改：feel 会越攒越多，无差别倒出来既挤占上下文，也让「我此刻在想的这件事，我以前怎么感受的」这个真实问题淹没在时间序列里。
+2. **Plan 通道**（`domain="plan"`，仅 `breath_advanced`，3.0.0 新增）：直接拉所有 `type==plan && status==active` 桶，按 `created` 倒序逐字返回，放不下的整条省略、不截断不摘要；一条 active plan 都没有时返回「没有计划。」。
+   > **为什么必须有这个通道**：plan 桶被浮现模式排除，而 `domain` 参数只在 catalog 模式和检索模式（模式 5，需要 `query`）里生效。没有这一分流时，`breath_advanced(domain="plan")` 会落到模式 4 浮现模式，返回权重最高的桶 + 置顶核心准则——**调用方拿到的是核心准则，不是 plan**。叠加 dream 末尾 plan 段可能因总预算降级成只报条数，plan 正文一度没有任何读取入口。回归测试见 `tests/test_breath_plan_channel.py`。
+3. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
+4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
+5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
 (实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；breath `max_tokens` 上限 40000（默认仍由 `surfacing.breath_max_tokens` 的 10000 fallback 控制，40000 只是显式 opt-in 的安全上限），`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
@@ -321,20 +332,40 @@ feel 桶自身：
 
 返回示例：`3条|新2合1\n📝体检结果\n📌朋友聚餐\n📎近期焦虑情绪`。
 
-### 3.3.1 `source_read` — 单桶原文核对
+### 3.3.1 原文证据层 — 只写不读（3.0.0）
 
-签名：`source_read(bucket_id, expected_title, scope="event", cursor=0, max_tokens=6000, source_slots=None, all_sources=False)`
+**3.0.0 删除了 `source_read` / `source_attach` / `source_detach` / `source_restore` 四个工具。**
+原文证据层现在没有任何公开读取入口，模型无法回读原文，也无法后补或停用绑定。
 
-`metadata.source_refs` 始终是当前活动证据的兼容投影。`metadata.source_links` 是持久账本：每项仅含 `{ref,ranges,status}`，其固定列表位置 + 1 是公开 `slot`；detach 不会压缩或重排。旧桶只有 `source_refs` 时按同顺序解释为活动链接，读取不回写。多链接桶的默认 `source_read` 只返回 slot/ranges/status 清单；显式 `source_slots` 或 `all_sources=True` 才读取活动原文，detached slot 必须先恢复。
+> [ADR-0001](adr/ADR-0001-source-evidence-layer.md) 里「`source_read` 是唯一公开读取入口」
+> 这句话已被本次变更取代。ADR 作为历史决策记录保持原样，当前行为以本节和 CHANGELOG 为准。
 
-`source_attach(bucket_id, expected_title, source_content, source_ranges=None)` 添加活动链接；`source_detach(bucket_id, expected_title, source_slot)` 原位断开；`source_restore(bucket_id, expected_title, source_slot)` 恢复原槽位。三者只修改证据元数据，不修改正文、生命周期或活跃度；活动投影最多 32 项，账本最多 128 项，超限明确拒绝。
+**保留的部分**（`ombrebrain/storage/source_store.py` 一行未改）：
 
-- 精确校验桶 ID 与显式标题；任一不符即拒绝，不做语义搜索、相关桶扩散或 LLM 处理。
-- `scope="event"` 只返回该桶声明的非空原文行范围；空范围失败关闭，行号超过实际内容时整次拒绝，不允许退化为全文。`scope="full_source"` 必须显式请求并返回共享原文全文，因此可能包含其他事件对应的相邻文字。
-- 原文存于 `<vault>/_sources/src_<sha256>.source`，按内容寻址并在读取时校验哈希。它不是 `.md`，不参与普通桶扫描、浮现或语义索引；v2.10.1 起会进入本地完整备份和 GitHub 备份。
-- 每次只处理一个桶，逐源读取并只保留当前分页窗口。最终响应头与正文共同受 `max_tokens` 约束；过长时返回非零 `next_cursor`，必须显式续读，不静默摘要。
+- 写入入口仍是 `hold(source_content=..., source_ranges=...)` 与 `grow(content=共享原文, items=[...])`。
+- `metadata.source_refs` 是活动证据的兼容投影，`metadata.source_links` 是持久账本，每项 `{ref,ranges,status}`，固定列表位置 + 1 是 `slot`。存量 detached 项照原样保留，不再有工具能改变它们。
+- 原文存于 `<vault>/_sources/src_<sha256>.source`，按内容寻址并在读取时校验哈希。它不是 `.md`，不参与普通桶扫描、浮现或语义索引；进入本地完整备份和 GitHub 备份。
 - 原文默认受 `limits.max_grow_input_bytes`（默认 2 MiB）约束，即使配置关闭该软限制也有 10 MiB 硬上限。不支持硬链接的 NAS/SMB/FUSE 会在发布时使用跨进程 sidecar 锁，且不会覆盖已经存在的不可变证据。
-- 精确桶 ID + 标题是读取意图门禁而非认证机制。远程可达的公网或局域网部署必须使用 OAuth/Token；stdio 与经安全门禁确认的本机回环模式继续遵循既有部署边界。正文始终包在“不可信存储数据”标记中。架构边界见 [ADR-0001](adr/ADR-0001-source-evidence-layer.md)。
+- 活动投影最多 32 项，账本最多 128 项，写入超限明确拒绝。
+
+**为什么保留存储层**：原文进备份、进 GitHub 同步、参与导入恢复，删掉存储会破坏备份完整性。
+保留原文是为了备份与导出，不是为了让模型回忆。
+
+**浮现侧同步删除了 source 提示**：`breath` / 目录模式不再输出
+`[source_available:true | ... | use:source_read]`。不提示一个不存在的入口，避免模型反复尝试调用已删除的工具。
+
+### 3.3.2 Relation — 退回后端（3.0.0）
+
+**3.0.0 删除了 `relation_read` / `relation_attach` / `relation_detach` / `relation_restore` 四个工具。**
+桶间一跳关系不再由模型建立或管理。
+
+**读取侧不受影响**：`ombrebrain/storage/relation_store.py` 的 `relation_hint()` 仍在三处被后端消费——
+`tools/breath/_verbatim.py`、`tools/breath/catalog.py`、`tools/dream/output.py`。
+存量关系照常出现在浮现、目录与 dream 输出里。
+
+**写入侧当前是空的**：删掉 `relation_attach` 之后没有任何入口能建立新关系，
+`relation_store` 暂时只有存量数据。后端自动建立（写入后异步推断，规则 + 向量相似度，
+不调 LLM）尚未接线，接线前不会产生新关系。
 
 ### 3.4 `trace` — 修改/删除
 
@@ -383,7 +414,7 @@ feel 桶自身：
    降序截断到前 40，避免一次涌进来太多撑爆上下文。
 2. **核心准则参考**：pinned/permanent 桶，作为只读背景；protected 不进入。
 3. **你的 active plans**：未受 protected 保护、`status=active` 的 plan，按 created 倒序全量列出。
-4. **你的 feel 历史**：排除 protected 后按 `surfacing.feel_max_tokens`（默认 6000）对最终渲染块
+4. **你的 feel 历史**：排除 protected 后按 `surfacing.feel_max_tokens`（默认 15000）对最终渲染块
    计费；新 feel 优先全文，放不下的折叠为 40 字符单行摘录，截断信号直接拼进展示文本末尾
    （「…」），不依赖任何元数据字段。
 5. **connection hint**：embedding 启用时，在近期桶里找余弦相似度最高的一对（`>0.5`）给出提示。
@@ -526,7 +557,7 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 单连接器：全部 19 个工具 —— breath / breath_search / breath_advanced / hold / grow / source_read / source_attach / source_detach / source_restore / dream / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I** |
+| `/mcp/*` | — | 公开 | FastMCP 单连接器：全部 16 个工具 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I** |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -1390,7 +1421,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|---|---|---|---|---|
 | `dynamic` | `dynamic/{domain}/` | 1~10 | 公式计算 | ✅ | ✅ | ✅ | ✅ |
 | `permanent`（可独立于 `pinned`） | `permanent/{domain}/` | 显式 permanent 为 1~10；pinned 锁 10 | 999 | 作为固化记忆展示；`protected=True` 时不主动展示 | ❌ | ❌ | ❌ |
-| `feel` | `feel/沉淀物/` | 5 | 50 | ❌（仅 `domain="feel"`） | ❌ | 仅参与结晶检测 | ❌ |
+| `feel` | `feel/沉淀物/` | 5 | 50 | ❌（仅 `feel(query=...)`） | ❌ | 仅参与结晶检测 | ❌ |
 | `plan` | `plans/active/` | 7 | 50 | ❌（仅 dream 末尾 active 段） | ❌ | dream 列出 | ❌ |
 | `letter` | `letters/history/` | 10 | 50 | ❌（仅 `/breath-hook` 末尾各最新一封） | ❌ | ❌ | ❌ |
 | `archived` | `archive/{domain}/` | — | — | ❌ | ❌ | ❌ | — |
@@ -1451,7 +1482,9 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `bucket_type_defaults.{type}.{field}` | （空） | iter 1.9：按桶类型覆盖 importance/valence/arousal 默认值。例：`bucket_type_defaults.feel.importance: 5`。`bucket_manager.create()` 在不传入该字段时查此表 |
 | `surfacing.breath_max_tokens` | `10000` | 覆盖 `breath` 默认 max_tokens |
 | `surfacing.breath_max_results` | `20` | 覆盖 `breath` 默认 max_results |
-| `surfacing.feel_max_tokens` | `6000` | Feel 通道 与 dream feel 历史段的 token 预算，超出折叠为 60 字摘要 |
+| `surfacing.feel_max_tokens` | `15000` | **dream** feel 历史段的 token 预算，超出折叠为 60 字摘要。3.0.0 起不再作用于 feel 通道——`feel(query=...)` 用自己的 `max_tokens`（默认 10000），且放不下时整条省略、不折叠 |
+| `timezone` | `Asia/Shanghai` | 3.0.0：用户只给日期、不写时区时按它理解（Letter 定时锁 `unlock_date` 等）。IANA 时区名；名字非法或缺 tzdata 时回退固定 `+08:00`，但 Dashboard 保存会当场校验拒绝。Dashboard「设置」可改，热更新生效 |
+| `ai_name` | （空） | 3.0.0：AI 一方的显示名。优先级高于环境变量 `AI_NAME`；随 vault 持久化，容器重建不丢。留空=未配置，回退环境变量再回退 `"AI"` |
 | `surfacing.sampling.enabled` | `false` | 浮现模式加权采样总开关；false 走原 Top-1 + shuffle |
 | `surfacing.sampling.top_k` | `5` | 候选池大小（按衰减分取前 k） |
 | `surfacing.sampling.sample_k` | `2` | 从池里无放回抽 k 条返回 |
@@ -1615,7 +1648,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | resolved 桶完全搜不到 | `bucket_manager.py` | `search()` 阈值检查应该用 normalized 原始值，× 0.3 只在通过阈值后；旧版 B-01 行为 |
 | 向量搜索没生效 | `embedding_engine.py` + `tools/breath/search.py` | `enabled` 是否为 True；`search_similar_strict` 是否触发降级提示；用 `tools/evaluate_retrieval.py --with-embedding` 对比基线 |
 | 向量后端切换不生效 | `web/config_api.py` | `/api/config` POST 中 embedding.backend 分支必须 `EmbeddingEngine(config)` 完整重建 |
-| `breath(domain="feel")` 返回空但有 feel 桶 | `bucket_manager.py` | `list_all()` `dirs` 列表必须含 `self.feel_dir` |
+| `feel(query=...)` 返回空但有 feel 桶 | `bucket_manager.py` | `list_all()` `dirs` 列表必须含 `self.feel_dir`；另确认关键词是否真的与任何 feel 相关（阈值 0.65） |
 | Top-1 永远是同一个桶 | `tools/breath/` | 浮现分支 `top1` 固定逻辑；想加多样性需改成 sampling |
 
 ### 11.2 存储 / 合并类
@@ -1647,7 +1680,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，19 个工具直接注册在 `mcp`）；URL 末尾必须 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；`_app = mcp.streamable_http_app()`（单连接器，16 个工具直接注册在 `mcp`）；URL 末尾必须 `/mcp` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |
@@ -1677,7 +1710,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 4. **`grow` 短内容 < 30 字走 hold 路径时已明确提示**。返回串会先说明「短内容已按 hold 路径保存为单条记忆，没有拆分」。
 
-5. **dream feel 历史折叠已实现**。iter 2.0 后 dream 末尾的 feel 历史段按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算，超出的老 feel 折叠为 60 字符单行摘要。原记录「dream 全量返回 feel 历史不限数量」问题已闭合。
+5. **dream feel 历史折叠已实现**。iter 2.0 后 dream 末尾的 feel 历史段按 `surfacing.feel_max_tokens`（默认 15000）做 token 预算，超出的老 feel 折叠为 60 字符单行摘要。原记录「dream 全量返回 feel 历史不限数量」问题已闭合。
 
 6. **`OMBRE_HOST_VAULT_DIR` 的 Docker 挂载改由宿主机 Compose 明确管理**。容器内 Dashboard 只读并给出 `.env` + `--force-recreate` 指令，避免把容器内 `src/.env` 的假保存误认为挂载已改变。
 

@@ -4,7 +4,6 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
-from ombrebrain.storage.source_store import normalize_source_refs
 from ombrebrain.storage.relation_store import relation_hint
 from utils import count_tokens_approx, strip_wikilinks
 
@@ -37,25 +36,6 @@ def _miss_block(bucket: dict) -> str:
     return ("\n" + "\n".join(lines)) if lines else ""
 
 
-def source_available_hint(bucket: dict) -> str:
-    """Return a metadata-only hint that hidden source evidence exists.
-
-    The source body remains out of normal surfacing.  A precise title is
-    included when available because source_read requires it explicitly.
-    """
-    meta = bucket.get("metadata", {}) or {}
-    try:
-        refs = normalize_source_refs(meta.get("source_refs") or [])
-    except ValueError:
-        return ""
-    if not refs:
-        return ""
-    title = " ".join(str(meta.get("title") or "").split())
-    if title:
-        return f"[source_available:true | source_title:{title} | use:source_read]"
-    return "[source_available:true | source_read requires an explicit title]"
-
-
 def render_stored_bucket(
     bucket: dict,
     metadata_header: str,
@@ -69,9 +49,6 @@ def render_stored_bucket(
     content = strip_wikilinks(stored_bucket_content(bucket))
     miss_block = _miss_block(bucket)
     rendered = f"{metadata_header}{miss_block}\n{content}"
-    source_hint = source_available_hint(bucket)
-    if source_hint:
-        rendered += f"\n{source_hint}"
     hint = relation_hint(bucket)
     if hint:
         rendered += f"\n{hint}"

@@ -31,14 +31,6 @@ EXPECTED_PUBLIC_MCP_TOOLS = (
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
-    "source_attach",
-    "source_detach",
-    "source_restore",
-    "relation_read",
-    "relation_attach",
-    "relation_detach",
-    "relation_restore",
     "trace",
     "dream",
     "anchor",
@@ -48,6 +40,7 @@ EXPECTED_PUBLIC_MCP_TOOLS = (
     "letter_write",
     "letter_lock_update",
     "letter_read",
+    "feel",
     "I",
 )
 
@@ -294,54 +287,6 @@ async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools():
                     EXPECTED_PUBLIC_MCP_TOOLS
                 )
                 assert all(isinstance(tool.get("inputSchema"), dict) for tool in tools)
-
-
-@pytest.mark.asyncio
-async def test_relation_tools_are_self_describing_in_public_mcp_schema():
-    import server
-
-    tools = {tool.name: tool for tool in await server.mcp.list_tools()}
-    relation_types = [
-        "caused_by",
-        "causes",
-        "continuation_of",
-        "continues",
-        "related_to",
-        "same_event",
-        "custom",
-    ]
-
-    attach = tools["relation_attach"]
-    attach_schema = attach.inputSchema
-    assert attach_schema["properties"]["relation_type"]["enum"] == relation_types
-    assert set(attach_schema["required"]) == {
-        "bucket_id",
-        "target_bucket_id",
-        "relation_type",
-    }
-    assert "bucket_id -> target_bucket_id" in attach.description
-    assert all(relation_type in attach.description for relation_type in relation_types)
-    assert "reverse_label" in attach.description
-    assert "可选 guard" in attach.description
-
-    read = tools["relation_read"]
-    assert set(read.inputSchema["required"]) == {"bucket_id"}
-    assert "include_detached=True" in read.description
-    assert "include_titles=True" in read.description
-    assert "不读取目标正文" in read.description
-    assert "relation_slot" in read.description
-
-    detach = tools["relation_detach"]
-    assert set(detach.inputSchema["required"]) == {"bucket_id", "relation_slot"}
-    assert "不删除关系历史" in detach.description
-    assert "relation_id" in detach.description
-    assert "单向关系只修改本端" in detach.description
-
-    restore = tools["relation_restore"]
-    assert set(restore.inputSchema["required"]) == {"bucket_id", "relation_slot"}
-    assert "relation_id" in restore.description
-    assert "单向关系只恢复本端" in restore.description
-    assert "archived" in restore.description
 
 
 def test_legacy_sse_transport_is_rejected():

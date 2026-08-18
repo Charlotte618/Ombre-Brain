@@ -153,7 +153,11 @@ def test_protected_plan_and_feel_never_enter_dream_output():
     assert "可见的近期记忆" in result
     assert "受保护计划正文不得进入 dream" not in result
     assert "受保护感受正文不得进入 dream" not in result
-    assert "=== 你的 active plans ===" not in result
+    # protected plan 被过滤后，plan 段必须明确说「没有计划」，不能静默消失——
+    # 否则「真的没有计划」和「plan 段被 token 预算挤掉」在返回里长得一样。
+    # 段头出现但正文缺席，正好证明 protected plan 走的是空分支而不是泄漏。
+    assert "=== 你的 active plans ===" in result
+    assert "没有计划。" in result
     assert "=== 你的 feel 历史" not in result
 
 
