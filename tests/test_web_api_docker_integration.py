@@ -175,7 +175,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         request_id = 0
 
-        def mcp_request(method, params=None, path="/mcp"):
+        def mcp_request(method, params=None, path="/mcp-extra"):
             nonlocal request_id
             request_id += 1
             response = client.post(
@@ -193,11 +193,11 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
             "protocolVersion": "2025-03-26",
             "capabilities": {},
             "clientInfo": {"name": "letter-dashboard-audit", "version": "1"},
-        }, path="/mcp-extra")
+        })
         ai_read = mcp_request("tools/call", {
             "name": "letter_read",
             "arguments": {"limit": 20},
-        }, path="/mcp-extra")
+        })
         ai_read_text = ai_read["result"]["content"][0]["text"]
         assert "李四" in ai_read_text
         assert human_secret not in ai_read_text
