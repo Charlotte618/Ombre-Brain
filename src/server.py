@@ -861,7 +861,7 @@ async def trace(
     importance=10。protected=1 保护记忆不被衰减，但不作为核心准则强制浮现；
     它与 pinned/anchor 互斥且同样锁定 importance=10。解除最后一层
     pinned/protected 保护时，必须在同一次调用显式传入 importance=1..10。
-    digested=1 标记已消化并从默认/被动浮现及 dream 隐藏，
+    digested=1 标记已消化并从默认/被动浮现及 dream 隐藏（对 pinned/permanent/anchor 桶不生效——核心准则与坐标系始终在场，要让某条安静请改用 trace(bucket_id, pinned=0)），
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
     两种方式都会重建 embedding，且不能同时使用。status/weight 用于 plan；dont_surface 控制日常浮现；
