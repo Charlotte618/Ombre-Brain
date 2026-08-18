@@ -353,6 +353,23 @@ mcp = FastMCP(
     lifespan=_stdio_lifespan if config.get("transport", "stdio") == "stdio" else None,
 )
 
+# 第二个连接器：信件。
+#
+# 信是写给未来的东西——有收件人、有时间锁、到期才打开，时间方向和记忆相反。
+# 记忆指向已经发生的事，信指向还没发生的事；没人在大脑里写信。它是个好功能，
+# 只是不属于主连接器，占着工具位会让模型在该回忆的时候去翻信。
+#
+# `/mcp-extra` 在 2.8.5 起退役返回 404，3.2.0 恢复。stdio 传输下只有一个进程，
+# 两个实例共用同一套 tools 实现，差别只在对外挂在哪个端点。
+mcp_extra = FastMCP(
+    "Ombre Brain Extra",
+    host=_BIND_HOST,
+    port=OMBRE_PORT,
+    json_response=True,
+    stateless_http=True,
+    streamable_http_path="/mcp-extra",
+)
+
 
 # =============================================================
 # Dashboard Auth —— 已拆分：会话/密码/鉴权 helper 在 web/_shared.py，
@@ -997,7 +1014,7 @@ async def plan(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_write(
     author: str,
     content: str,
@@ -1025,7 +1042,7 @@ async def letter_write(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_lock_update(
     letter_id: str,
     lock_type: str,
@@ -1048,7 +1065,7 @@ async def letter_lock_update(
     )
 
 
-@mcp.tool()
+@mcp_extra.tool()
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -1108,8 +1125,14 @@ async def I(
 # 写工具甚至会在未应用客户端目标字段时仍创建记忆。breath 和 trace
 # 已有严格适配层，其余公开工具使用相同边界，并同步 FastMCP
 # 的发现 schema 缓存与运行时校验器。
-def _forbid_unknown_tool_arguments(tool_name: str) -> None:
-    public_tool = mcp._tool_manager.get_tool(tool_name)
+def _forbid_unknown_tool_arguments(tool_name: str, server: object = None) -> None:
+    """拒绝未知参数，并同步 FastMCP 的发现 schema。
+
+    ``server`` 指定工具注册在哪个连接器上。信件三工具自 3.2.0 起挂在
+    ``mcp_extra``（/mcp-extra），在主实例里查不到——严格校验必须跟着工具走，
+    否则 /mcp-extra 会成为一条参数拼错也照样"成功"的旁路。
+    """
+    public_tool = (server or mcp)._tool_manager.get_tool(tool_name)
     if public_tool is None:
         raise RuntimeError(f"registered {tool_name} tool is missing")
     arg_model = public_tool.fn_metadata.arg_model
@@ -1118,24 +1141,25 @@ def _forbid_unknown_tool_arguments(tool_name: str) -> None:
     public_tool.parameters = arg_model.model_json_schema()
 
 
-for _strict_tool_name in (
-    "breath_search",
-    "breath_advanced",
-    "hold",
-    "grow",
-    "dream",
-    "anchor",
-    "release",
-    "pulse",
-    "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
-    "feel",
-    "I",
+for _strict_tool_name, _strict_server in (
+    ("breath_search", mcp),
+    ("breath_advanced", mcp),
+    ("hold", mcp),
+    ("grow", mcp),
+    ("dream", mcp),
+    ("anchor", mcp),
+    ("release", mcp),
+    ("pulse", mcp),
+    ("plan", mcp),
+    # 信件在 /mcp-extra，严格校验跟着工具走。
+    ("letter_write", mcp_extra),
+    ("letter_lock_update", mcp_extra),
+    ("letter_read", mcp_extra),
+    ("feel", mcp),
+    ("I", mcp),
 ):
     try:
-        _forbid_unknown_tool_arguments(_strict_tool_name)
+        _forbid_unknown_tool_arguments(_strict_tool_name, _strict_server)
     except (AttributeError, RuntimeError, TypeError, ValueError) as _schema_exc:
         logger.warning(
             "%s strict-argument adapter unavailable: %s",
@@ -1239,9 +1263,10 @@ if __name__ == "__main__":
             token_validator=_mcp_token_validator,
             lifecycle=_runtime_lifecycle,
             static_token_validator=_mcp_static_token_validator,
+            mcp_extra=mcp_extra,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：16 个工具统一对外暴露")
+            logger.info("MCP /mcp：13 个记忆工具；/mcp-extra：3 个信件工具")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
