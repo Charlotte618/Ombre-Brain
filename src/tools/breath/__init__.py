@@ -29,6 +29,8 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 
 from typing import Optional
 
+from utils import parse_bool
+
 from .. import _runtime as rt
 from .._common import (
     check_metadata_size,
@@ -59,6 +61,7 @@ async def dispatch(
     catalog: Optional[bool] = False,
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
+    quotes: Optional[bool] = False,
 ) -> str:
     # --- Null-safe coercion ---
     query = "" if query is None else str(query)
@@ -78,6 +81,7 @@ async def dispatch(
         catalog = False
     date_from = "" if date_from is None else str(date_from)
     date_to = "" if date_to is None else str(date_to)
+    quotes = parse_bool(quotes, default=False)
 
     query_err = check_query_size(query)
     if query_err:
@@ -100,6 +104,7 @@ async def dispatch(
         "catalog": catalog,
         "date_from": date_from,
         "date_to": date_to,
+        "quotes": quotes,
     })
     await rt.decay_engine.ensure_started()
 
@@ -169,4 +174,5 @@ async def dispatch(
         tag_filter=tag_filter,
         date_from=date_from,
         date_to=date_to,
+        with_quotes=quotes,
     ))

@@ -1425,6 +1425,7 @@ class BucketManager:
         defer_derived_index: bool = False,
         imported: bool = False,
         source_refs: Any = None,
+        quotes: Any = None,
         event_actor: str = "system",
         lock_type: str = "",
         unlock_date: str | None = None,
@@ -1542,6 +1543,12 @@ class BucketManager:
 
             metadata["source_links"] = source_links_from_metadata({"source_refs": source_refs})
             metadata["source_refs"] = active_source_refs_from_links(metadata["source_links"])
+        # 引语：当时说出口、并且当时就知道它重要的那几句话，原样存下。
+        # 落在 metadata 而不是正文，是为了让渲染路径**结构上就拿不到**——
+        # render_stored_bucket / dream / catalog 都是白名单渲染，不会碰这个字段。
+        # "平时不返回"不能靠"记得别渲染"。
+        if quotes:
+            metadata["quotes"] = self._sanitize_quotes(quotes)
         if imported:
             metadata["imported"] = True
         if test_data:
@@ -2389,6 +2396,9 @@ class BucketManager:
             kwargs["source_refs_append"] = normalize_source_refs(
                 kwargs["source_refs_append"]
             )
+        if "quotes_append" in kwargs:
+            # 早校验：非法引语在这里就报错，不要等到写文件那一步。
+            kwargs["quotes_append"] = self._sanitize_quotes(kwargs["quotes_append"])
 
         try:
             post = frontmatter.load(file_path)
@@ -2526,6 +2536,20 @@ class BucketManager:
             links = append_source_links(post.metadata, kwargs["source_refs_append"])
             post["source_links"] = links
             post["source_refs"] = active_source_refs_from_links(links)
+        if "quotes_append" in kwargs and kwargs["quotes_append"]:
+            # 合并到已有桶时两边的引语都保留——每条引语属于它自己的那个时刻，
+            # 不因为两段记忆被合并就作废。超上限的部分丢弃并明说，不静默。
+            merged, dropped = self._merge_quotes(
+                post.metadata.get("quotes"), kwargs["quotes_append"]
+            )
+            if merged:
+                post["quotes"] = merged
+            if dropped:
+                _ob_push_warning(
+                    "OB-W006",
+                    f"合并到已有记忆后引语超过上限，最早的几条被保留，"
+                    f"另外 {dropped} 条未写入（update:{bucket_id}）",
+                )
         if "resolved" in kwargs:
             post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:
@@ -4049,6 +4073,62 @@ class BucketManager:
             + list(range(0x2066, 0x206A))        # bidi isolates 0x2066..0x2069
         }
         return str(text).translate(_ctrl_table)
+
+    @staticmethod
+    def _sanitize_quotes(value: Any) -> list[dict[str, str]]:
+        """归一化 + 清洗引语，返回可直接写进 frontmatter 的结构。
+
+        分工：`normalize_quotes` 管结构、条数与长度（超限直接 raise，不截断，
+        因为截断过的引语已经不是原话）；这里只补 F-04 控制字符清洗。
+        清洗只会让文本变短，所以不会绕过上面的长度校验。
+        """
+        from ombrebrain.storage.quote_store import normalize_quotes
+
+        cleaned: list[dict[str, str]] = []
+        for quote in normalize_quotes(value):
+            entry = {
+                key: BucketManager._sanitize_text(text).strip()
+                for key, text in quote.items()
+            }
+            # 整条内容都是控制字符时 text 会被清空——那不是一句话，丢掉。
+            if entry.get("text"):
+                cleaned.append({key: text for key, text in entry.items() if text})
+        return cleaned
+
+    @staticmethod
+    def _merge_quotes(
+        existing: Any, incoming: Any
+    ) -> tuple[list[dict[str, str]], int]:
+        """合并两组引语，返回 (结果, 因超上限被丢弃的条数)。
+
+        合并到已有桶时两边的引语都该留下——每条引语属于它自己的那个时刻，
+        不因为两段记忆被合并就作废。但上限仍然要守，否则反复合并就能
+        无限累积，这个功能会变回"存原文"。
+
+        超出时保留**先来的**：早先记住的那几句是更早那个时刻的判断，
+        新来的引语至少还在当次调用的返回里说明被丢弃了。
+
+        已存在的引语用宽容读取（磁盘上的数据可能被手工编辑坏），
+        本次传入的用严格校验——只有当下这次输入才该收到明确的报错。
+        """
+        from ombrebrain.storage.quote_store import MAX_QUOTES, quotes_from_metadata
+
+        groups = (
+            quotes_from_metadata({"quotes": existing}),
+            BucketManager._sanitize_quotes(incoming),
+        )
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for group in groups:
+            for quote in group:
+                key = (quote["text"], quote.get("speaker", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(quote)
+        if len(merged) <= MAX_QUOTES:
+            return merged, 0
+        return merged[:MAX_QUOTES], len(merged) - MAX_QUOTES
 
     @staticmethod
     def _sanitize_float_field(value, default: float) -> float:

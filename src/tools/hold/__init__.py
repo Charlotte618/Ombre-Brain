@@ -23,6 +23,7 @@ core（普通存入 + 自动合并）。
 
 from typing import Optional
 
+from ombrebrain.storage.quote_store import normalize_quotes
 from ombrebrain.storage.source_store import normalize_source_ranges
 from utils import normalize_memory_title, parse_bool
 
@@ -44,6 +45,24 @@ def _normalize_explicit_domain(value: str | list[str] | None) -> list[str] | Non
         parts = [item.strip() for item in str(value or "").split(",")]
     normalized = list(dict.fromkeys(item for item in parts if item))
     return normalized or None
+
+
+def _prepare_quotes(value: object) -> tuple[list[dict] | None, str]:
+    """校验本次要原样记住的那几句话。
+
+    超限直接拒绝，不静默截断——截断过的引语已经不是原话了，
+    而"原样"正是这个功能存在的全部理由。
+
+    错误信息是给调用方（也就是我自己）看的，所以要说清楚为什么被拒，
+    而不是只丢一个"参数非法"。
+    """
+    if value in (None, "", []):
+        return None, ""
+    try:
+        quotes = normalize_quotes(value)
+    except ValueError as exc:
+        return None, f"引语无效，未创建任何桶：{exc}"
+    return (quotes or None), ""
 
 
 def _prepare_source_refs(
@@ -100,6 +119,7 @@ async def dispatch(
     domain: Optional[str | list[str]] = "",
     source_content: Optional[str] = "",
     source_ranges: Optional[list] = None,
+    quotes: Optional[list] = None,
 ) -> str:
     content = "" if content is None else str(content)
     try:
@@ -169,6 +189,7 @@ async def dispatch(
         "why_remembered_length": len(why_remembered or ""),
         "source_content_length": len(str(source_content or "")),
         "source_ranges_count": len(source_ranges or []) if isinstance(source_ranges, list) else 0,
+        "quotes_count": len(quotes or []) if isinstance(quotes, list) else 0,
     })
     await rt.decay_engine.ensure_started()
 
@@ -225,6 +246,10 @@ async def dispatch(
     if source_error:
         return source_error
 
+    quotes_list, quotes_error = _prepare_quotes(quotes)
+    if quotes_error:
+        return quotes_error
+
     # 所有越界/配额提醒走统一 warnings channel；server.py _with_notice 末尾自动追加。
     # 这里返回值只承载业务正文。
 
@@ -240,6 +265,7 @@ async def dispatch(
             meaning=meaning,
             media=media,
             source_refs=source_refs,
+            quotes=quotes_list,
         )
         return result
 
@@ -255,6 +281,7 @@ async def dispatch(
             media=media,
             explicit_domain=explicit_domain,
             source_refs=source_refs,
+            quotes=quotes_list,
         )
         return result
 
@@ -271,5 +298,6 @@ async def dispatch(
         test_data=test_data,
         explicit_domain=explicit_domain,
         source_refs=source_refs,
+        quotes=quotes_list,
     )
     return result
