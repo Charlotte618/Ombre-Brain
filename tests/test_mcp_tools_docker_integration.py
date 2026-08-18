@@ -122,6 +122,11 @@ EXPECTED_TOOL_PROPERTIES = {
         "deletion_request_id",
         "deletion_decision",
         "deletion_ai_reason",
+        # 3.3.0：修正后端自动建错的桶间关系。relink 只能改已存在关系的
+        # 类型，凭空建立仍然只归后端——没有对应的 link 参数是有意的。
+        "unlink",
+        "relink",
+        "relation_type",
     },
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},

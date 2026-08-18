@@ -2,6 +2,40 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.3.0
+
+> 3.2.0 把关系建立交给了后端自动推断，却没留下任何修正入口——连错了只能手改
+> Markdown 的 frontmatter，而且得记住关系是双向的、两个文件都要改。这一版补上。
+
+### 新增 / Added
+
+- **`trace` 支持修正连错的桶间关系**，三个新参数：`unlink` / `relink` / `relation_type`。
+  - `trace(id, unlink="目标id")` — **双向物理移除**这一对关系，两侧各删一条。
+    不是标成 `status="detached"`：3.0.0 删掉了 `relation_restore`，detached 会变成
+    一个再也回不来的僵尸状态，还白占 `MAX_RELATION_LINKS` 名额。删掉也不会被
+    重建——`link_new_bucket` 只在**新建桶**时触发推断，那一对桶不会再出生第二次。
+  - `trace(id, relink="目标id", relation_type="continuation_of")` — 改已存在关系的
+    类型，对侧自动写入反向类型（A `continuation_of` B ⇒ B `continues` A）。改过的
+    关系**降级为手动关系**（去掉 `auto` / `score`），此后受 `merge_auto_links` 保护，
+    不再被自动推断按相似度挤掉。
+  - **`relink` 不能凭空建立关系**：两侧都没有这条关系时明确拒绝。这是它与 3.0.0
+    删掉的 `relation_attach` 之间唯一的区别——「建立」仍然只归后端，理由见
+    `tools/_relation_link.py` 开头：关联不是一个决定，是一个结果。
+  - **为什么加进 `trace` 而不是新开工具**：修正关系和「改这条记忆的 importance」
+    是同一类事——看了一眼已有的东西，然后说它不对。`trace` 本来就是唯一的
+    「写元数据」入口，关系也是元数据。工具数仍是 16 个。
+  - 两个参数互斥，也与其他字段更新互斥（走独立早返回分支）。不支持 `custom`：
+    custom 关系必须带 label，而 trace 没有传 label 的入口。单向残留（一侧有、
+    另一侧没有，存量数据里真实存在）两种操作都能处理干净。
+
+### 内部 / Internal
+
+- `relation_store` 新增两个纯函数 `unlink_relation` / `retype_relation`；trace 分支
+  实现拆在 `tools/trace/_relation_edit.py`（`trace/core.py` 已 737 行，逼近 800 行硬上限）。
+- 新增 21 个用例（`tests/test_trace_relation_edit.py`），重点测边界而不是"能改成功"：
+  凭空建立被拒、双向都要清干净、拒绝后关系原封不动。两处关键断言做了阴阳对照——
+  破坏 missing 检查、破坏双向 unlink，各自都能让对应用例变红。
+
 ## 3.2.0
 
 > 施工单三步走完最后两步。3.0.0 只做了第一步（删减 8 个工具）就发布了，

@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "33bdaf9e2d6bcbde2e4e613e865e403f8fe21fc621078d34c30b0bdc7f68d903",
+      "sha256": "5eee6c0c5c6901f5e523f0a434bca4106e1ff7136deb451f982b0bb1a7b13716",
       "size": 6
     },
     {
@@ -732,8 +732,8 @@
     },
     {
       "path": "src/ombrebrain/storage/relation_store.py",
-      "sha256": "965dc24857a0c653683e18fbd2cd54f43574263b65ee9d2b175a8334700ae4e7",
-      "size": 9821
+      "sha256": "a3b31e67340da8f9219adb925aac636a81d50f8dc3d1f164a2daf6cec9fd24d3",
+      "size": 12902
     },
     {
       "path": "src/ombrebrain/storage/source_store.py",
@@ -762,8 +762,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "9bf2d05e062925b3c3bcc177696c347d5b79535d5bc4bfe06d850de6f0d8a123",
-      "size": 66168
+      "sha256": "9f4b40425b6d0ec43d69c888c1732d4f8cc40ca0af2951701aaab4df697b9899",
+      "size": 67096
     },
     {
       "path": "src/server_app.py",
@@ -926,9 +926,14 @@
       "size": 488
     },
     {
+      "path": "src/tools/trace/_relation_edit.py",
+      "sha256": "738d08c02b1df9acae86749fdac914130d4790d6926ea15497afe68ac5ee273e",
+      "size": 7439
+    },
+    {
       "path": "src/tools/trace/core.py",
-      "sha256": "af1f9ada3601782a7d57c3cd6773a5df5a06bca004bec0c97888970276cc8b73",
-      "size": 31222
+      "sha256": "88ff1e6d9d3842305a1cacb5e556b906c3281f325237d0f34dd78c9196409e92",
+      "size": 32253
     },
     {
       "path": "src/utils.py",
@@ -1047,5 +1052,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.2.0"
+  "version": "3.3.0"
 }

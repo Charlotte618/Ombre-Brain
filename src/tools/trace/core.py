@@ -16,9 +16,12 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
   同一次调用显式传入 importance=1..10，原子恢复动态评分
 - content 改写时同步重建 embedding，并对 plan 桶追加 change_log
 - resolved/digested 切换会附中文语义提示
+- unlink/relink 修正后端自动建错的桶间关系，双向生效，走独立早返回
+  分支（见 _relation_edit.py），不与字段更新混用
 
 不做什么（边界）：
 - 不创建桶（那是 hold/grow/plan/letter 的事）
+- 不凭空建立桶间关系——relink 只改已存在关系的类型，「建立」仍归后端
 - 不把普通记忆转换成可擦除测试数据，也不物理删除普通记忆
 - 不返回结构化数据，统一中文短句
 
@@ -26,7 +29,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      tags, resolved, pinned, protected, digested, content, delete,
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
-                     hard_delete, delete_reason, restore, old_str, new_str) → str
+                     hard_delete, delete_reason, restore, old_str, new_str,
+                     unlink, relink, relation_type) → str
 ========================================
 """
 
@@ -45,6 +49,7 @@ from .._common import (
     check_protected_quota,
 )
 from ..plan.core import is_letter_bucket, letter_lock_revision, letter_lock_state
+from . import _relation_edit
 
 
 async def trace_core(
@@ -74,6 +79,9 @@ async def trace_core(
     restore: Optional[bool] = False,
     old_str: Optional[str] = "",
     new_str: Optional[str] = None,
+    unlink: Optional[str] = "",
+    relink: Optional[str] = "",
+    relation_type: Optional[str] = "",
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -193,6 +201,18 @@ async def trace_core(
 
     if not bucket_id or not bucket_id.strip():
         return "请提供有效的 bucket_id。"
+
+    # 关系修正是独立分支：它只动 relation_links，不参与下面的字段收集，
+    # 所以在这里就地返回，不和 delete / content 改写等混在一起。
+    unlink = str(unlink or "").strip()
+    relink = str(relink or "").strip()
+    relation_type = str(relation_type or "").strip()
+    if unlink or relink or relation_type:
+        if not await rt.bucket_mgr.get(bucket_id):
+            return f"找不到记忆 {bucket_id}；本次未修改。"
+        return await _relation_edit.apply(
+            bucket_id.strip(), unlink, relink, relation_type
+        )
 
     if restore or delete or hard_delete:
         guarded_reader = (

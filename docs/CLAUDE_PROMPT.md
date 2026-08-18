@@ -111,8 +111,12 @@
 | 改 plan 状态                   | `trace(plan_id, status="resolved")` — 仅对 plan 桶                                                                        |
 | 调 plan 重量                   | `trace(plan_id, weight=0.8)`                                                                                               |
 | 改/补「为什么记得」            | `trace(id, why_remembered="...")`                                                                                          |
+| 这两条根本不该连在一起         | `trace(id, unlink="目标id")` — 双向断开后端自动建的关联                                                                    |
+| 该连，但关系类型判错了         | `trace(id, relink="目标id", relation_type="related_to")` — 改已有关系的类型，对侧自动取反向；不能凭空建立关系              |
 
 局部替换前先读取当前原文（普通桶可按完整 ID 使用 `breath_search`；预算不足时用 `breath_advanced(..., max_tokens=20000)`；其他类型可用对应入口或 Dashboard），再复制连续片段作为 `old_str`。匹配是逐字且按起始位置计数的，只有正文中恰好出现一次才会写入；零次命中、包含重叠在内的多次命中、或替换后正文为空都会拒绝且不改桶。替换本身始终针对存储中的完整正文，长桶和 pinned 桶也不会绕过同桶并发锁。
+
+桶间关系由后端在写入时自动建立，你**不需要也无法主动建立**它们（关联是发现，不是决定）。但看到 `↳ 相关 → xxx` 这类提示明显不对时，可以用 `unlink` / `relink` 修正——`relink` 只能改已存在关系的类型，两条记忆之间原本没有关系时会被拒绝。改过的关系此后不再被自动推断改写。
 
 **`anchor` 字段不在 trace 里**——切换 anchor 必须走专门的 `anchor()` / `release()`，受 24 上限保护。`protected` 使用独立配额（默认 20），它与 pinned、anchor 都不能并存；显式 query/catalog 仍可找到受保护记忆。
 

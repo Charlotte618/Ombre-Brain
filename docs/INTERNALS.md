@@ -403,7 +403,7 @@ if text_match or semantic_match: 入选
 
 ### 3.4 `trace` — 修改/删除
 
-签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, protected=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", restore=False, old_str="", new_str=None)`
+签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, protected=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", restore=False, old_str="", new_str=None, unlink="", relink="", relation_type="")`
 
 - `delete=True` → `bucket_mgr.delete()`：写入 `deleted_at` 并将 Markdown 移入 `archive/`；只清理可重建的 embedding 索引，不抹除记忆文件。
 - `hard_delete=True` → 仅当桶在创建时带有 `provenance.kind=test` 与 `erasable=true` 才物理删除；真实记忆、后补字段及普通 Dashboard 路径均不得越过此边界。Dashboard 普通模式支持多选/当前筛选全选的沉底、主动遗忘和归档，开发者模式才显示测试桶永久删除入口。
@@ -427,6 +427,11 @@ if text_match or semantic_match: 入选
 - `meaning_append` 日常追加一条 meaning；`meaning_replace` 仅在纠错时整体替换。`media_append` / `media_replace` 同理管理持久媒体引用。
 - `hard_delete=True` 必须同时提供非空且不超过 500 字符的 `delete_reason`，不能与 `delete=True` 同时使用，且只接受创建时已标记为可擦除测试数据的桶；普通记忆与 plan 始终拒绝物理删除，拒绝时不会顺带归档。
 - **不暴露 `anchor` 字段**：anchor 切换必须走 `anchor()` / `release()` 工具（受 24 上限保护）。
+- `unlink` / `relink` + `relation_type` 修正后端自动建错的桶间关系（3.3.0）。两者互斥，且与其他字段更新互斥（走独立早返回分支，不参与 updates 收集）。
+  - `unlink="目标id"`：**双向物理移除**这一对关系，两侧各删一条。不是标成 `status="detached"`——3.0.0 删掉了 `relation_restore`，detached 会变成再也回不来的僵尸状态还白占 `MAX_RELATION_LINKS` 名额。删掉不会被重建：`link_new_bucket` 只在**新建桶**时触发推断，那一对桶不会再出生第二次。
+  - `relink="目标id", relation_type="related_to"`：改已存在关系的类型，对侧自动写入 `reverse_relation_type`（A `continuation_of` B ⇒ B `continues` A）。改过的关系**降级为手动关系**（去掉 `auto` / `score`），此后受 `merge_auto_links` 保护，不再被自动推断按相似度挤掉。
+  - **`relink` 不能凭空建立关系**：两侧都没有这条关系时明确拒绝。这是它与 3.0.0 删掉的 `relation_attach` 之间唯一的区别——「建立」仍然只归后端，理由见 `tools/_relation_link.py` 开头。
+  - 不支持 `custom`：custom 关系必须带 label，而 trace 没有传 label 的入口。单向残留（一侧有、另一侧没有）两种操作都能处理。
 
 (返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 

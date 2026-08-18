@@ -854,6 +854,9 @@ async def trace(
     deletion_request_id: Optional[str] = "",
     deletion_decision: Optional[str] = "",
     deletion_ai_reason: Optional[str] = "",
+    unlink: Optional[str] = "",
+    relink: Optional[str] = "",
+    relation_type: Optional[str] = "",
 ) -> str:
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
@@ -874,6 +877,14 @@ async def trace(
     trace(bucket_id="...", restore=True) 恢复；若历史归档同时带有 protected/anchor，
     只能用 restore=True、protected=0、importance=1..10 原子解除冲突后恢复。
     检索命中不会自动恢复。只传需要修改的字段，-1 或空串表示不改。
+
+    关系修正：桶间关系由后端在写入时自动建立，模型不需要也无法主动建立它们；
+    但发现连错了可以在这里改。unlink="目标id" 双向断开这一对的关联；
+    relink="目标id" 配合 relation_type=（caused_by / causes / continuation_of /
+    continues / related_to / same_event）把已存在关系改成正确的类型，对侧自动
+    取反向类型。改过的关系会被标记为手动关系，此后不再被自动推断改写或挤掉。
+    relink 不能凭空建立关系——两条记忆之间没有已存在的关系时会被拒绝。
+    这两个参数与其他字段更新互斥，请单独调用。
     """
     if deletion_request_id or deletion_decision:
         result = await deletion_requests.decide(
@@ -898,6 +909,7 @@ async def trace(
             hard_delete=hard_delete, delete_reason=delete_reason,
             restore=restore,
             old_str=old_str, new_str=new_str,
+            unlink=unlink, relink=relink, relation_type=relation_type,
         ),
         op="trace",
         args={
@@ -917,6 +929,7 @@ async def trace(
             "meaning_replace_count": len(meaning_replace or []),
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
+            "unlink": unlink, "relink": relink, "relation_type": relation_type,
         },
     )
 
