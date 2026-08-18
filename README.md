@@ -235,7 +235,9 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现全部 16 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`。
+重启 Claude Desktop，工具列表里会出现主连接器的 13 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `I`。
+
+信件在**第二个连接器** `/mcp-extra` 上（`letter_write` / `letter_lock_update` / `letter_read`），要用的话在客户端里再加一条连接。写信是一个行为，不是一段记忆——它有收件人、有时间锁，时间方向和记忆相反，放在主连接器里会让模型在该回忆的时候去翻信。
 
 > 16 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
 
@@ -318,7 +320,8 @@ Claude.ai                    Ombre Brain 服务器
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_lock_update` `letter_read` `I` | 全部 16 个工具 |
+| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `I` | 记忆本身的 13 个动作 |
+| `/mcp-extra` | `letter_write` `letter_lock_update` `letter_read` | 信件（3.2.0 起独立，2.8.5–3.1.0 期间该路径退役返回 404）|
 
 > 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。全部 16 个工具都在 `/mcp`。
 

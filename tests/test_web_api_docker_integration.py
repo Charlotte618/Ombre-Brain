@@ -300,7 +300,10 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         assert client.get("/.well-known/oauth-protected-resource/mcp").status_code == 404
         assert client.get("/.well-known/oauth-protected-resource/not-a-route").status_code == 404
-        assert client.get("/mcp-extra").status_code == 404
+        # /mcp-extra 自 3.2.0 起是信件连接器，不再是退役路径。
+        # GET 拿 406（streamable-http 只接受 POST + JSON Accept），不是 404——
+        # 404 意味着"这条路不存在"，而它现在存在且被鉴权/体积限制保护着。
+        assert client.get("/mcp-extra").status_code == 406
 
         invalid_transport = client.post(
             "/api/transport",
