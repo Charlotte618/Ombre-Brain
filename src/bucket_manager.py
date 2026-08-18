@@ -3620,6 +3620,29 @@ class BucketManager:
                 # Threshold check uses raw (pre-penalty) score so resolved buckets
                 # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
                 # remain reachable by keyword (penalty applied only to ranking).
+                # ⚠️ 已知设计债：这道门混了两类不同的东西。
+                #
+                # `normalized` 是七维加权和，其中 topic / bm25 / semantic 回答的是
+                # "这条记忆和查询有关吗"，而 emotion / time / importance / touch
+                # 回答的是"这条记忆本身怎么样"（新不新、重不重要、被摸过几次）。
+                # 两个问题被加成同一个分数，去过同一道门。
+                #
+                # 2026-08-18 对 917 桶真实记忆扫描过：相关性三维全为 0 却入选的
+                # 命中数是 **0**。但那是**算术上的巧合，不是设计上的保证**——
+                # 后四维权重合计 3.5/13.5，凑不满 fuzzy_threshold=50 而已。
+                # 这几个权重都在 config.scoring 里，谁把 time_weight 从 1.5 调到
+                # 4.0，门立刻就漏，而且是静默地漏：不报错、不变慢，只是开始返回
+                # "最近、很重要、但跟你问的完全无关"的记忆。
+                #
+                # 对的形状是把召回与排序分开：
+                #     门：  max(topic, bm25, semantic) >= 门槛   ← 只有相关性维度能开门
+                #     排序：现在这套七维加权分                    ← 后四维在这里发挥作用
+                # 一条相关的记忆因为更新、更重要而排前面完全合理；但它不该因为
+                # 新和重要就变得"相关"。
+                #
+                # 没有立刻改，是因为当前没有故障、且这是召回主路径；真要动需要先
+                # 攒一批带标准答案的查询（"我问了什么、期望返回什么"），否则无法
+                # 验证新门是不是把该召回的挡在了外面。见 docs/INTERNALS.md §3.1。
                 text_match = normalized >= self.fuzzy_threshold or literal_hit
                 semantic_match = (
                     semantic_score is not None

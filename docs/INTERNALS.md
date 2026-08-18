@@ -298,6 +298,40 @@ feel 桶自身：
 4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
 5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
+#### 检索的门：召回与排序目前没有分开（已知设计债）
+
+`BucketManager.search()` 里决定「一条桶进不进结果」的判定是：
+
+```
+text_match     = normalized >= fuzzy_threshold(50) or literal_hit
+semantic_match = semantic_score >= vector_recall_threshold(0.55)
+if text_match or semantic_match: 入选
+```
+
+`normalized` 是**七维加权和**，而这七维回答的是两个不同的问题：
+
+| 维度 | 回答的问题 | 权重 |
+|---|---|---|
+| topic / bm25 / semantic | **这条记忆和查询有关吗** | 4.0 / 1.5 / 2.5 |
+| emotion / time / importance / touch | 这条记忆本身怎么样 | 2.0 / 1.5 / 1.0 / 1.0 |
+
+两个问题被加成同一个分数去过同一道门。**一条与查询毫无关系但足够新、足够重要的记忆，理论上可以靠后四维凑够 50 分进入结果。**
+
+2026-08-18 对 917 桶真实记忆扫过：相关性三维全为 0 却入选的命中数是 **0**。但那是**算术上的巧合，不是设计上的保证**——后四维权重合计 3.5/13.5，最多贡献约 25.9 分，凑不满门槛而已。这几个权重都在 `config.scoring` 里可改，把 `time_weight` 从 1.5 调到 4.0，门立刻就漏，而且是**静默地漏**：不报错、不变慢，只是开始返回「最近、很重要、但跟你问的完全无关」的记忆。
+
+对的形状是把**召回**与**排序**分开：
+
+```
+门：  max(topic, bm25, semantic) >= 门槛   ← 只有相关性维度有资格开门
+排序：现在这套七维加权分                    ← 后四维在这里发挥作用
+```
+
+一条相关的记忆因为更新、更重要而排在前面完全合理；但它不该因为新和重要就变得「相关」。这样保证是**结构性**的：不管权重怎么调，无关的记忆都进不来——而今天靠的是「没人会乱调权重」，那不算保证。
+
+**为什么没有立刻改**：当前没有故障，而这是召回主路径；真要动需要先攒一批带标准答案的查询（「我问了什么、期望返回什么」），否则无法验证新门是不是把该召回的挡在了外面——只测「有没有泄漏」是不够的。
+
+**什么时候它会从隐患变成故障**：调了 `config.scoring` 里任何权重（尤其 time / importance）、或记忆库规模增长到非相关维度分布明显改变时。代码位置见 `src/bucket_manager.py` 的 `text_match` 判定处，那里有同样的注释。
+
 (实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；breath `max_tokens` 上限 40000（默认仍由 `surfacing.breath_max_tokens` 的 10000 fallback 控制，40000 只是显式 opt-in 的安全上限），`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
 ### 3.1.1 Footprint 与显式恢复
