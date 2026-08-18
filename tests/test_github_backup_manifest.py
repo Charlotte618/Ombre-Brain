@@ -9,6 +9,7 @@ import frontmatter
 import github_sync as github_sync_mod
 from github_sync import GitHubSync
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.you import YouStore, validate_you_snapshot_bytes
 
 
 def _json_response(method: str, url: str, status_code: int, payload: dict) -> httpx.Response:
@@ -50,6 +51,95 @@ def test_backup_manifest_refuses_dangling_source_reference():
 
     with pytest.raises(RuntimeError, match="dangling source evidence"):
         sync._build_backup_manifest({"dynamic/a.md": bucket})
+
+
+@pytest.mark.asyncio
+async def test_sync_includes_transactional_you_snapshot(monkeypatch, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    YouStore(vault).set_enabled(True, expected_revision=0)
+    sync = GitHubSync(token="token", repo="owner/repo")
+    captured = {}
+
+    async def capture(files):
+        captured.update({path: files[path] for path in files})
+        return len(files)
+
+    monkeypatch.setattr(sync, "_batch_commit", capture)
+    result = await sync.sync(str(vault))
+
+    assert result == {"ok": True, "uploaded": 1}
+    assert set(captured) == {".you/you.sqlite3"}
+    validate_you_snapshot_bytes(captured[".you/you.sqlite3"])
+
+
+@pytest.mark.asyncio
+async def test_import_restores_verified_you_snapshot(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    source_state = YouStore(source).set_enabled(True, expected_revision=0)
+    snapshot_path = tmp_path / "you-snapshot.sqlite3"
+    YouStore(source).snapshot_to(snapshot_path)
+    snapshot_data = snapshot_path.read_bytes()
+    relative = ".you/you.sqlite3"
+    manifest = {
+        "schema_version": 1,
+        "generated_at": "2026-08-18T00:00:00+00:00",
+        "file_count": 1,
+        "total_bytes": len(snapshot_data),
+        "files": [{
+            "path": relative,
+            "bytes": len(snapshot_data),
+            "sha256": hashlib.sha256(snapshot_data).hexdigest(),
+        }],
+    }
+    manifest_data = json.dumps(manifest).encode()
+    sync = GitHubSync(token="token", repo="owner/repo", path_prefix="ombre")
+
+    async def fake_request(_client, method, url, **_kwargs):
+        if url.endswith("/git/ref/heads/main"):
+            return _json_response(method, url, 200, {"object": {"sha": "head-sha"}})
+        if url.endswith("/git/commits/head-sha"):
+            return _json_response(method, url, 200, {"tree": {"sha": "tree-sha"}})
+        if url.endswith("/git/trees/tree-sha?recursive=1"):
+            return _json_response(method, url, 200, {
+                "truncated": False,
+                "tree": [
+                    {
+                        "type": "blob",
+                        "path": "ombre/_ombre_backup_manifest.json",
+                        "sha": "manifest-sha",
+                        "size": len(manifest_data),
+                    },
+                    {
+                        "type": "blob",
+                        "path": f"ombre/{relative}",
+                        "sha": "you-sha",
+                        "size": len(snapshot_data),
+                    },
+                ],
+            })
+        if url.endswith("/git/blobs/manifest-sha"):
+            return _json_response(method, url, 200, {
+                "encoding": "base64",
+                "content": base64.b64encode(manifest_data).decode(),
+            })
+        if url.endswith("/git/blobs/you-sha"):
+            return _json_response(method, url, 200, {
+                "encoding": "base64",
+                "content": base64.b64encode(snapshot_data).decode(),
+            })
+        raise AssertionError(f"Unexpected GitHub API call: {method} {url}")
+
+    monkeypatch.setattr(sync, "_request", fake_request)
+    target = tmp_path / "target"
+    result = await sync.import_from_github(str(target))
+
+    assert result["ok"] is True
+    assert result["you_restored"] is True
+    restored = YouStore(target).get_state()
+    assert restored.enabled is True
+    assert restored.scope == source_state.scope
 
 
 @pytest.mark.asyncio

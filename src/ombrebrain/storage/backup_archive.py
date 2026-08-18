@@ -1,9 +1,10 @@
 """Safe, verifiable local backup archives for Ombre Brain.
 
-Markdown remains the source of truth.  The SQLite file is only a derived-index
-snapshot, but exporting it consistently avoids a needless full reindex after a
-restore.  A manifest detects incomplete/corrupted archives; it is an integrity
-check, not a cryptographic signature of who created the archive.
+Markdown remains the event-memory source of truth. The embeddings database is
+a rebuildable index; the optional You database is separately scoped, derived
+state. Transactional snapshots keep both consistent during export. A manifest
+detects incomplete/corrupted archives; it is an integrity check, not a
+cryptographic signature of who created the archive.
 """
 
 from __future__ import annotations
@@ -25,6 +26,11 @@ from .source_store import (
     HARD_MAX_SOURCE_BYTES,
     SOURCE_REF_RE,
     referenced_source_ids_from_markdown,
+)
+from ombrebrain.you.store import (
+    YouStoreError,
+    validate_you_snapshot_bytes,
+    validate_you_snapshot_file,
 )
 
 
@@ -50,6 +56,7 @@ MIGRATE_MAX_BUCKET_BYTES = 10 * MIB
 MIGRATE_MAX_SOURCE_BYTES = HARD_MAX_SOURCE_BYTES
 MIGRATE_MAX_EXPORT_META_BYTES = 1 * MIB
 MIGRATE_MAX_EMBEDDINGS_DB_BYTES = 512 * MIB
+MIGRATE_MAX_YOU_DB_BYTES = 128 * MIB
 MIGRATE_MIN_FREE_RESERVE_BYTES = 64 * MIB
 
 
@@ -83,6 +90,8 @@ def _migration_member_limit(path: str) -> int:
         return MAX_MANIFEST_BYTES
     if path == "embeddings.db":
         return MIGRATE_MAX_EMBEDDINGS_DB_BYTES
+    if path == "you/you.sqlite3":
+        return MIGRATE_MAX_YOU_DB_BYTES
     if path == "export_meta.json":
         return MIGRATE_MAX_EXPORT_META_BYTES
     parts = PurePosixPath(path).parts
@@ -98,14 +107,24 @@ def _migration_member_limit(path: str) -> int:
     raise BackupArchiveError(f"迁移包包含不支持的成员: {path}")
 
 
-def snapshot_sqlite(db_path: str) -> bytes:
+def snapshot_sqlite(
+    db_path: str,
+    *,
+    label: str = "embeddings.db",
+    max_bytes: int = MIGRATE_MAX_EMBEDDINGS_DB_BYTES,
+) -> bytes:
     """Return a transactionally consistent SQLite snapshot."""
     if not db_path or not os.path.isfile(db_path):
         return b""
     fd, temp_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     try:
-        _snapshot_sqlite_to_file(db_path, temp_path)
+        _snapshot_sqlite_to_file(
+            db_path,
+            temp_path,
+            label=label,
+            max_bytes=max_bytes,
+        )
         return Path(temp_path).read_bytes()
     finally:
         try:
@@ -114,7 +133,13 @@ def snapshot_sqlite(db_path: str) -> bytes:
             pass
 
 
-def _snapshot_sqlite_to_file(db_path: str, target_path: str) -> bool:
+def _snapshot_sqlite_to_file(
+    db_path: str,
+    target_path: str,
+    *,
+    label: str = "embeddings.db",
+    max_bytes: int = MIGRATE_MAX_EMBEDDINGS_DB_BYTES,
+) -> bool:
     """Write a consistent SQLite snapshot to disk without retaining its bytes."""
 
     if not db_path or not os.path.isfile(db_path):
@@ -124,12 +149,12 @@ def _snapshot_sqlite_to_file(db_path: str, target_path: str) -> bool:
     try:
         page_count = int(source.execute("PRAGMA page_count").fetchone()[0])
         page_size = int(source.execute("PRAGMA page_size").fetchone()[0])
-        if page_count * page_size > MAX_MEMBER_BYTES:
-            raise BackupArchiveError("embeddings.db 快照超过 512 MiB 成员上限")
+        if page_count * page_size > max_bytes:
+            raise BackupArchiveError(f"{label} 快照超过成员上限")
         source.backup(target)
         result = target.execute("PRAGMA quick_check").fetchone()
         if not result or str(result[0]).lower() != "ok":
-            raise BackupArchiveError("embeddings.db 快照完整性检查失败")
+            raise BackupArchiveError(f"{label} 快照完整性检查失败")
     finally:
         target.close()
         source.close()
@@ -304,6 +329,18 @@ def build_export_archive(
     db_bytes = snapshot_sqlite(embedding_db_path)
     if db_bytes:
         files["embeddings.db"] = db_bytes
+    you_db_path = Path(buckets_dir).resolve() / ".you" / "you.sqlite3"
+    you_bytes = snapshot_sqlite(
+        str(you_db_path),
+        label="you/you.sqlite3",
+        max_bytes=MIGRATE_MAX_YOU_DB_BYTES,
+    )
+    if you_bytes:
+        try:
+            validate_you_snapshot_bytes(you_bytes)
+        except YouStoreError as exc:
+            raise BackupArchiveError("You 快照结构校验失败") from exc
+        files["you/you.sqlite3"] = you_bytes
     meta_bytes = json.dumps(
         export_meta, ensure_ascii=False, indent=2, default=str
     ).encode("utf-8")
@@ -404,6 +441,8 @@ def build_export_archive_file(
     os.close(archive_fd)
     snapshot_fd, snapshot_path = tempfile.mkstemp(prefix="ombre-embedding-", suffix=".db")
     os.close(snapshot_fd)
+    you_snapshot_fd, you_snapshot_path = tempfile.mkstemp(prefix="ombre-you-", suffix=".db")
+    os.close(you_snapshot_fd)
     entries: list[dict[str, Any]] = []
     total_uncompressed = 0
 
@@ -467,6 +506,25 @@ def build_export_archive_file(
                     )
                 )
 
+            you_db_path = base / ".you" / "you.sqlite3"
+            if _snapshot_sqlite_to_file(
+                str(you_db_path),
+                you_snapshot_path,
+                label="you/you.sqlite3",
+                max_bytes=MIGRATE_MAX_YOU_DB_BYTES,
+            ):
+                try:
+                    validate_you_snapshot_file(you_snapshot_path)
+                except YouStoreError as exc:
+                    raise BackupArchiveError("You 快照结构校验失败") from exc
+                record(
+                    _stream_file_member(
+                        archive,
+                        source=Path(you_snapshot_path),
+                        arc_path="you/you.sqlite3",
+                    )
+                )
+
             meta_bytes = json.dumps(
                 export_meta,
                 ensure_ascii=False,
@@ -516,6 +574,10 @@ def build_export_archive_file(
     finally:
         try:
             os.unlink(snapshot_path)
+        except OSError:
+            pass
+        try:
+            os.unlink(you_snapshot_path)
         except OSError:
             pass
 

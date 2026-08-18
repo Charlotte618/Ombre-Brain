@@ -8,7 +8,7 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 16 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
+- 启动后暴露 16 个基础 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
   trace/anchor/release/pulse/plan/letter_write/
   letter_lock_update/letter_read/dream/feel/I；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
@@ -24,7 +24,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp 单实例 + 16 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：mcp 单实例 + 16 个固定 @mcp.tool() 函数 + 可选 You；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -51,6 +51,7 @@ from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.you import YouService, YouStore, YouToolGate
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
@@ -69,6 +70,7 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools import you as _t_you
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -236,6 +238,14 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
 migrate_engine = MigrateEngine(config, bucket_mgr, embedding_engine)              # Migrate engine / 记忆包迁移引擎
+you_service = YouService(
+    store=YouStore(config.get("buckets_dir", "buckets")),
+    bucket_mgr=bucket_mgr,
+    dehydrator=dehydrator,
+    source_store=source_store,
+    logger=logger,
+)
+bucket_mgr.attach_bucket_change_observer(you_service.observe_bucket_change)
 
 # --- GitHub Sync / GitHub 同步 ---
 from github_sync import GitHubSync  # type: ignore
@@ -319,7 +329,7 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP endpoint is externally reachable
 # stdio mode ignores host (no network)
 #
-# iter 2.2 后对外只有单连接器 /mcp。当前 16 个工具全部直接注册到
+# iter 2.2 后对外只有单连接器 /mcp。16 个基础工具全部直接注册到
 # 这一实例，不再依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
 # 稳定暴露完整工具清单。
 #
@@ -421,6 +431,7 @@ _wsh.init_runtime(
     import_engine=import_engine,
     migrate_engine=migrate_engine,
     github_sync_instance=github_sync_instance,
+    you_service=you_service,
     restart_github_auto_task=_restart_github_auto_task,
 )
 # 启动时把磁盘上的会话装回内存（容器重启不踢登录）。鉴权/会话逻辑全在 web/_shared.py，
@@ -468,7 +479,7 @@ _wsh.init_runtime(
 
 # =============================================================
 # 结构化操作日志 helpers（任务A，2026-05-03）
-# 给 23 个 MCP 工具入口统一打 entry/ok/err 三段日志，便于排查
+# 给 MCP 工具入口统一打 entry/ok/err 三段日志，便于排查
 # 客户端报 invalid_arguments / 静默错误等问题。
 # 输出格式：op=<name> phase=entry|ok|err key=value...
 # 所有可能含 PII 的字段（content / 信件正文等）只记 length，不记内容。
@@ -623,6 +634,7 @@ _tools_runtime.init(
     embedding_outbox=embedding_outbox,
     import_engine=import_engine,
     source_store=source_store,
+    you_service=you_service,
     logger=logger,
     fire_webhook=_fire_webhook,
     mark_op=_mark_op,
@@ -1144,6 +1156,30 @@ for _strict_tool_name in (
         )
 
 
+# You is the only dynamically exposed tool. The persisted switch is read after
+# all 16 baseline tools are registered, so the default-off surface is unchanged.
+you_tool_gate = YouToolGate(mcp, _t_you.dispatch)
+try:
+    you_tool_gate.sync(you_service.status().enabled)
+except Exception as _you_gate_exc:
+    logger.error("You MCP gate failed closed: %s", type(_you_gate_exc).__name__)
+    _you_state = you_service.status()
+    if _you_state.enabled:
+        try:
+            you_service.set_enabled(
+                False,
+                expected_revision=_you_state.state_revision,
+            )
+        except Exception:
+            logger.error("You persistent fail-closed update failed", exc_info=True)
+    try:
+        you_tool_gate.sync(False)
+    except Exception:
+        pass
+_wsh.init_runtime(you_tool_gate=you_tool_gate)
+migrate_engine.attach_you_runtime(you_service, you_tool_gate)
+
+
 # =============================================================
 # Dashboard API 端点（供轻量 Web UI 使用）
 # 仪表板 API（轻量 Web UI 用）
@@ -1208,6 +1244,7 @@ if __name__ == "__main__":
             logger=logger,
             decay_engine=decay_engine,
             embedding_outbox=embedding_outbox,
+            you_service=you_service,
             ensure_ollama_child=_ollama_local.ensure_child_on_boot,
             stop_ollama_child=_ollama_local.stop_child,
             load_tunnel_config=_load_tunnel_config,
@@ -1241,7 +1278,9 @@ if __name__ == "__main__":
             static_token_validator=_mcp_static_token_validator,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：16 个工具统一对外暴露")
+            logger.info(
+                "MCP 单连接器 /mcp：16 个基础工具，You 按独立开关动态显隐"
+            )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
@@ -1280,7 +1319,7 @@ if __name__ == "__main__":
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    16 个记忆工具全部对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    16 个基础记忆工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
@@ -1327,12 +1366,13 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio：16 个工具已直接注册在唯一 mcp 实例上；启动成功边界由
+        # stdio：16 个基础工具已直接注册在唯一 mcp 实例上，You 按独立开关显隐；启动成功边界由
         # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
         # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
         _stdio_runtime_lifecycle = RuntimeLifecycle(
             logger=logger,
             embedding_outbox=embedding_outbox,
+            you_service=you_service,
             boot_marker_path=os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                 ".boot_fails",

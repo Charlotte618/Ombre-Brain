@@ -2477,6 +2477,24 @@
       </div>
     </div>
 
+    <!-- You 只暴露这一处总开关；内部记录与审核流程不进入 Dashboard。 -->
+    <div class="config-section" id="sec-you" data-sgroup="basics">
+      <h3>你 <span class="sec-en">You</span></h3>
+      <p id="you-setting-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        <span style="display:block;">在长期相处中慢慢理解你</span>
+        <span style="display:block;">关闭后不再更新或使用，不影响其他功能。</span>
+      </p>
+      <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
+        <span id="you-toggle-label">关闭</span>
+        <span class="hw-switch" id="you-enabled-sw" role="switch" tabindex="0"
+          aria-checked="false" aria-labelledby="you-toggle-label" aria-describedby="you-setting-description"
+          onclick="toggleYouSetting(this)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleYouSetting(this);}"></span>
+        <input type="checkbox" id="you-enabled" style="display:none" aria-hidden="true">
+      </div>
+      <div id="you-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
+    </div>
+
     <!-- ① 我 -->
     <div class="config-section" id="sec-me" data-sgroup="basics">
       <h3>我 <span class="sec-en">Me</span></h3>
@@ -4351,6 +4369,74 @@ async function loadSamplingSettings() {
   }
 }
 
+var _youStateRevision = 0;
+var _youToggleBusy = false;
+
+function renderYouSetting(enabled, message, isError) {
+  setHwSwitch('you-enabled', !!enabled);
+  var label = document.getElementById('you-toggle-label');
+  var status = document.getElementById('you-setting-msg');
+  var control = document.getElementById('you-enabled-sw');
+  if (label) label.textContent = enabled ? '开启' : '关闭';
+  if (status) {
+    status.textContent = message || '';
+    status.style.color = isError ? 'var(--negative)' : 'var(--text-dim)';
+  }
+  if (control) {
+    control.setAttribute('aria-disabled', _youToggleBusy ? 'true' : 'false');
+    control.style.pointerEvents = _youToggleBusy ? 'none' : '';
+    control.style.opacity = _youToggleBusy ? '.65' : '';
+  }
+}
+
+async function loadYouSetting() {
+  try {
+    var response = await authFetch('/api/settings/you');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _youStateRevision = Number(data.state_revision) || 0;
+    renderYouSetting(data.enabled === true, '', false);
+  } catch (error) {
+    renderYouSetting(false, '加载失败', true);
+  }
+}
+
+async function toggleYouSetting(control) {
+  if (_youToggleBusy || !control) return;
+  var desired = control.getAttribute('aria-checked') !== 'true';
+  _youToggleBusy = true;
+  renderYouSetting(desired, '保存中…', false);
+  try {
+    var response = await authFetch('/api/settings/you', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        enabled: desired,
+        state_revision: _youStateRevision,
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _youStateRevision = Number(data.state_revision) || 0;
+    renderYouSetting(data.enabled === true, '', false);
+  } catch (error) {
+    await loadYouSetting();
+    var status = document.getElementById('you-setting-msg');
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  } finally {
+    _youToggleBusy = false;
+    var current = document.getElementById('you-enabled');
+    renderYouSetting(current ? current.checked : false,
+      document.getElementById('you-setting-msg')?.textContent || '',
+      document.getElementById('you-setting-msg')?.style.color === 'var(--negative)');
+  }
+}
+
 async function saveSamplingSettings() {
   const msg = document.getElementById('sampling-msg');
   msg.style.color = 'var(--text-dim)';
@@ -4710,6 +4796,7 @@ function activateDashboardTab(tab) {
         refreshEnvConfig(),
         loadGithubStatus(),
         loadSamplingSettings(),
+        loadYouSetting(),
         loadEnvVars(),
         loadHostVault(),
         loadLocalEmbStatus()

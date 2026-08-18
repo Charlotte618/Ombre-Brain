@@ -294,6 +294,26 @@ def register(mcp) -> None:
                 }, status_code=409)
             # 2) 从 GitHub 拉回。GitHubSync 内部再与定时 sync 共用同一把锁。
             result = await sh.github_sync_instance.import_from_github(buckets_dir)
+            if result.pop("you_restored", False):
+                try:
+                    state = sh.you_service.status()
+                    sh.you_tool_gate.sync(state.enabled)
+                except Exception:
+                    state = sh.you_service.status()
+                    if state.enabled:
+                        try:
+                            sh.you_service.set_enabled(
+                                False,
+                                expected_revision=state.state_revision,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        sh.you_tool_gate.sync(False)
+                    except Exception:
+                        pass
+                    result["ok"] = False
+                    result["error"] = "恢复后的 You 开关未能生效，已按关闭处理"
             result["pre_import_backup"] = backup
             # 3) 让 bucket_mgr 的 BM25 索引失效（导入直写磁盘，绕过了 bucket_mgr 的脏标记）
             try:

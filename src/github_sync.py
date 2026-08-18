@@ -2,7 +2,7 @@
 github_sync.py — GitHub 仓库同步（用于 bucket 数据云端备份）
 
 策略：
-- 同步 buckets_dir 下的 .md 记忆和 _sources 下内容寻址的原文证据
+- 同步 buckets_dir 下的 .md 记忆、_sources 原文证据和经校验的 You 事务快照
 - embeddings.db 不上传（二进制，可由 /api/embedding/migrate 重算）
 - 使用 GitHub Git Trees API 批量提交（一次同步 = 一个 commit）
 - 支持手动触发 + 可选的定时自动同步
@@ -32,6 +32,7 @@ from ombrebrain.storage.source_store import (
     SourceStore,
     referenced_source_ids_from_markdown,
 )
+from ombrebrain.you import YouStore, YouStoreError, validate_you_snapshot_file
 from utils import _win_long_path
 
 logger = logging.getLogger("ombre_brain.github_sync")
@@ -48,6 +49,7 @@ _MAX_MANIFEST_BASE64_BYTES = ((_MAX_MANIFEST_PAYLOAD_BYTES + 2) // 3) * 4 + 64 *
 _MAX_RESTORE_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST_FILENAME = "_ombre_backup_manifest.json"
 _SOURCE_REFS_COMPLETE_FIELD = "source_refs_complete"
+_YOU_RELATIVE_PATH = ".you/you.sqlite3"
 
 
 class _LazyMarkdownFiles(Mapping[str, bytes]):
@@ -105,6 +107,46 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
         return content
 
 
+class _OverlayBackupFiles(Mapping[str, bytes]):
+    """Layer bounded snapshot paths over the historical collector result."""
+
+    def __init__(
+        self,
+        base: Mapping[str, bytes],
+        extra_paths: Mapping[str, str],
+    ) -> None:
+        paths: dict[str, str] = {}
+        for relative, full in extra_paths.items():
+            normalized = str(relative).replace("\\", "/")
+            if normalized != _YOU_RELATIVE_PATH:
+                raise RuntimeError(
+                    f"unsupported extra GitHub backup path: {normalized}"
+                )
+            if not os.path.isfile(full) or os.path.islink(full):
+                raise RuntimeError("You snapshot is unavailable or unsafe")
+            if os.path.getsize(full) > _MAX_FILE_BYTES:
+                raise RuntimeError(
+                    f"GitHub backup file exceeds {_MAX_FILE_BYTES} bytes: {normalized}"
+                )
+            paths[normalized] = full
+        self._base = base
+        self._extra = _LazyMarkdownFiles(paths)
+
+    def __len__(self) -> int:
+        return len(set(self._base).union(self._extra))
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._base
+        for relative in self._extra:
+            if relative not in self._base:
+                yield relative
+
+    def __getitem__(self, relative_path: str) -> bytes:
+        if relative_path in self._extra:
+            return self._extra[relative_path]
+        return self._base[relative_path]
+
+
 def _is_source_relative_path(relative_path: str) -> bool:
     parts = str(relative_path).replace("\\", "/").split("/")
     return bool(
@@ -116,8 +158,11 @@ def _is_source_relative_path(relative_path: str) -> bool:
 
 
 def _is_backup_relative_path(relative_path: str) -> bool:
-    return str(relative_path).endswith(".md") or _is_source_relative_path(
-        relative_path
+    normalized = str(relative_path).replace("\\", "/")
+    return (
+        normalized.endswith(".md")
+        or _is_source_relative_path(normalized)
+        or normalized == _YOU_RELATIVE_PATH
     )
 
 
@@ -216,18 +261,26 @@ class GitHubSync:
     # --------------------------------------------------------
 
     async def sync(self, buckets_dir: str) -> dict[str, Any]:
-        """同步 buckets_dir 下记忆与原文证据到 GitHub。"""
+        """同步记忆、原文证据和可用的 You 快照到 GitHub。"""
         async with self._sync_lock:
             try:
-                files = self._collect_files(buckets_dir)
-                if not files:
-                    self.last_status = "ok"
-                    self.last_error = ""
-                    self.last_sync = _now_iso()
-                    self.last_count = 0
-                    return {"ok": True, "uploaded": 0, "message": "无可同步文件"}
+                with tempfile.TemporaryDirectory(prefix="ombre-github-you-") as temp_dir:
+                    snapshot_path = os.path.join(temp_dir, "you.sqlite3")
+                    extra_paths: dict[str, str] = {}
+                    if YouStore(buckets_dir).snapshot_to(snapshot_path):
+                        validate_you_snapshot_file(snapshot_path)
+                        extra_paths[_YOU_RELATIVE_PATH] = snapshot_path
+                    files = self._collect_files(buckets_dir)
+                    if extra_paths:
+                        files = _OverlayBackupFiles(files, extra_paths)
+                    if not files:
+                        self.last_status = "ok"
+                        self.last_error = ""
+                        self.last_sync = _now_iso()
+                        self.last_count = 0
+                        return {"ok": True, "uploaded": 0, "message": "无可同步文件"}
 
-                count = await self._batch_commit(files)
+                    count = await self._batch_commit(files)
                 self.last_sync = _now_iso()
                 self.last_status = "ok"
                 self.last_error = ""
@@ -370,6 +423,7 @@ class GitHubSync:
                 imported = 0
                 buckets_imported = 0
                 sources_imported = 0
+                you_restored = False
                 skipped = 0
                 errors: list[str] = []
                 # 先把远端不可变 blob 全部下载到临时区并完成清单/证据校验。
@@ -425,6 +479,11 @@ class GitHubSync:
                         stage_path = os.path.join(staging_dir, f"{index:05d}.blob")
                         with open(stage_path, "wb") as stage_handle:
                             stage_handle.write(data)
+                        if rel == _YOU_RELATIVE_PATH:
+                            try:
+                                validate_you_snapshot_file(stage_path)
+                            except YouStoreError as exc:
+                                raise RuntimeError("You backup snapshot is invalid") from exc
                         staged[rel] = stage_path
 
                     referenced_sources: set[str] = set()
@@ -515,7 +574,10 @@ class GitHubSync:
                                         pass
                                 raise
                             imported += 1
-                            buckets_imported += 1
+                            if rel == _YOU_RELATIVE_PATH:
+                                you_restored = True
+                            elif rel.endswith(".md"):
+                                buckets_imported += 1
                         except Exception as exc:
                             skipped += 1
                             errors.append(f"{rel}: {exc}")
@@ -523,7 +585,7 @@ class GitHubSync:
                 self.last_sync = _now_iso()
                 restore_ok = skipped == 0
                 self.last_status = "ok" if restore_ok else "error"
-                return {
+                result = {
                     "ok": restore_ok,
                     "imported": imported,
                     "buckets_imported": buckets_imported,
@@ -536,6 +598,9 @@ class GitHubSync:
                     "backup_manifest": backup_manifest,
                     "integrity_warning": integrity_warning,
                 }
+                if you_restored:
+                    result["you_restored"] = True
+                return result
         except Exception as e:
             logger.error(f"[github_sync] import failed: {e}")
             self.last_status = "error"

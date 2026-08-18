@@ -3,7 +3,8 @@
 migrate_engine.py — 完整记忆包导入引擎
 ========================================
 
-把 /api/export 产生的 zip 包（buckets/*.md + embeddings.db + export_meta.json）
+把 /api/export 产生的 zip 包（buckets/*.md + sources/* + embeddings.db +
+可选 you/you.sqlite3 + export_meta.json）
 以增量 merge 方式写入当前系统。
 
 关键行为：
@@ -63,6 +64,11 @@ from ombrebrain.storage.source_store import (
     referenced_source_ids_from_metadata,
 )
 from ombrebrain.storage.relation_store import normalize_relation_links
+from ombrebrain.you.store import (
+    YouStoreError,
+    validate_you_snapshot_bytes,
+    validate_you_snapshot_file,
+)
 
 try:
     from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
@@ -263,6 +269,10 @@ class MigrateEngine:
         self._zip_db_bytes: Optional[bytes] = None
         self._zip_db_path: str = ""
         self._source_members: dict[str, bytes | str] = {}
+        self._you_db_bytes: Optional[bytes] = None
+        self._you_db_path: str = ""
+        self._you_service: Any = None
+        self._you_tool_gate: Any = None
         self._parse_temp_dir: str = ""
         self._parsed_at_monotonic: float = 0.0
         self._total_buckets: int = 0
@@ -333,6 +343,8 @@ class MigrateEngine:
         self._zip_db_bytes = None
         self._zip_db_path = ""
         self._source_members = {}
+        self._you_db_bytes = None
+        self._you_db_path = ""
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -634,6 +646,8 @@ class MigrateEngine:
         self._zip_db_bytes = parsed.get("db_bytes")
         self._zip_db_path = str(parsed.get("db_path") or "")
         self._source_members = dict(parsed.get("source_members") or {})
+        self._you_db_bytes = parsed.get("you_db_bytes")
+        self._you_db_path = str(parsed.get("you_db_path") or "")
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -769,6 +783,8 @@ class MigrateEngine:
         db_bytes: Optional[bytes] = None
         db_path = ""
         source_members: dict[str, bytes | str] = {}
+        you_db_bytes: Optional[bytes] = None
+        you_db_path = ""
         referenced_sources: set[str] = set()
         files: dict[str, bytes | str] = package["files"]
         names = set(files)
@@ -800,6 +816,18 @@ class MigrateEngine:
                 db_bytes = bytes(source)
                 validate_sqlite_bytes(db_bytes)
                 has_embeddings = bool(db_bytes)
+
+        if "you/you.sqlite3" in names:
+            you_source = files["you/you.sqlite3"]
+            try:
+                if disk_backed:
+                    you_db_path = str(you_source)
+                    validate_you_snapshot_file(you_db_path)
+                else:
+                    you_db_bytes = bytes(you_source)
+                    validate_you_snapshot_bytes(you_db_bytes)
+            except YouStoreError as exc:
+                raise BackupArchiveError("You 快照结构校验失败") from exc
 
         # 3) 原文证据按文件名中的内容哈希预检。旧版备份可能完全
         # 没有 sources/，保持可导入并显式告警；但只要包已声称携带证据，
@@ -904,6 +932,8 @@ class MigrateEngine:
             "db_bytes": db_bytes,
             "db_path": db_path,
             "source_members": source_members,
+            "you_db_bytes": you_db_bytes,
+            "you_db_path": you_db_path,
             "integrity_verified": package["integrity_verified"],
             "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
@@ -1065,6 +1095,26 @@ class MigrateEngine:
             ]
             await self._schedule_reindex()
 
+            if self._you_db_bytes or self._you_db_path:
+                exact_restore = (
+                    len(imported_id_map) == len(self._parsed_buckets)
+                    and all(source_id == target_id for source_id, target_id in imported_id_map.items())
+                )
+                if exact_restore:
+                    try:
+                        await _to_thread_reaped(
+                            self._install_you_snapshot,
+                            buckets_dir,
+                        )
+                    except Exception as exc:
+                        message = f"You 快照恢复失败，已保留当前状态: {exc}"
+                        logger.warning("[migrate] %s", message)
+                        self._apply_errors.append(message)
+                else:
+                    self._apply_errors.append(
+                        "You 快照未恢复：记忆未按原 ID 完整导入"
+                    )
+
             invalidate = getattr(self._bucket_mgr, "_invalidate_bm25", None)
             if callable(invalidate):
                 invalidate()
@@ -1085,6 +1135,53 @@ class MigrateEngine:
             self._cleanup_parse_artifacts()
             self._parsed_buckets = []
             self._buckets_to_reindex = []
+
+    def attach_you_runtime(self, service: Any, tool_gate: Any) -> None:
+        self._you_service = service
+        self._you_tool_gate = tool_gate
+
+    def _install_you_snapshot(self, buckets_dir: str) -> None:
+        base = os.path.abspath(buckets_dir)
+        root = os.path.join(base, ".you")
+        if os.path.lexists(root) and os.path.islink(root):
+            raise BackupArchiveError("You 恢复目录不能是符号链接")
+        os.makedirs(root, exist_ok=True)
+        target = os.path.join(root, "you.sqlite3")
+        if os.path.lexists(target) and os.path.islink(target):
+            raise BackupArchiveError("You 恢复目标不能是符号链接")
+        descriptor, temp_path = tempfile.mkstemp(prefix="you-restore-", suffix=".db", dir=root)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                if self._you_db_path:
+                    with open(self._you_db_path, "rb") as source:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                else:
+                    output.write(self._you_db_bytes or b"")
+                output.flush()
+                os.fsync(output.fileno())
+            validate_you_snapshot_file(temp_path)
+            os.replace(_win_long_path(temp_path), _win_long_path(target))
+        finally:
+            _safe_unlink(temp_path)
+
+        service = self._you_service
+        gate = self._you_tool_gate
+        if service is None or gate is None:
+            return
+        state = service.status()
+        try:
+            gate.sync(state.enabled)
+        except Exception:
+            if state.enabled:
+                try:
+                    service.set_enabled(False, expected_revision=state.state_revision)
+                except Exception:
+                    pass
+            try:
+                gate.sync(False)
+            except Exception:
+                pass
+            raise BackupArchiveError("You MCP 状态同步失败")
 
     def _install_source_members(self, buckets_dir: str) -> None:
         source_limit = self._source_content_limit()
@@ -1346,6 +1443,18 @@ class MigrateEngine:
             os.path.normcase(os.path.abspath(existing_path))
             == os.path.normcase(os.path.abspath(target_path))
         )
+        if not same_target:
+            # macOS commonly uses a case-insensitive filesystem.  An imported
+            # ``Memory_...`` filename can therefore resolve to the existing
+            # ``memory_...`` inode even though the path strings differ.
+            try:
+                same_target = os.path.samefile(existing_path, target_path)
+            except (FileNotFoundError, OSError):
+                same_target = False
+        if same_target:
+            # Keep the existing spelling and location when replacing the
+            # active bucket; only its contents and metadata should change.
+            target_path = existing_path
         try:
             if not same_target and os.path.exists(target_path):
                 raise FileExistsError(f"恢复目标已存在: {target_path}")
