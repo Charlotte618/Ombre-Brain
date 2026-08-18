@@ -63,7 +63,7 @@ EXPECTED_TOOL_ORDER = (
 
 EXPECTED_TOOL_PROPERTIES = {
     "breath": set(),
-    "breath_search": {"query", "domain", "max_results", "date_from", "date_to"},
+    "breath_search": {"query", "domain", "max_results", "date_from", "date_to", "quotes"},
     "breath_advanced": {
         "query",
         "max_tokens",
@@ -94,7 +94,9 @@ EXPECTED_TOOL_PROPERTIES = {
         "domain",
         "source_content",
         "source_ranges",
+        "quotes",
     },
+    # grow 的 quotes 在 items 的元素里，不是顶层参数——digest 路径不该有引语。
     "grow": {"content", "items", "test_data"},
     "trace": {
         "bucket_id",
