@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；13 个记忆工具注册到 `/mcp`，3 个信件工具注册到 `/mcp-extra`，`YouToolGate` 按持久开关在主连接器动态增减唯一可选工具。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；16 个工具（含信件三件套）全部注册到唯一连接器 `/mcp`，`YouToolGate` 按持久开关在其上动态增减唯一可选工具。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。各域模块导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -266,14 +266,13 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（16 个基础工具，分为 13 + 3；另有 1 个可选工具）
+## 3. MCP 工具规格（16 个基础工具；另有 1 个可选工具）
 
-> **双连接器（3.2.0 起）**：`/mcp` 暴露 13 个记忆工具，`/mcp-extra` 暴露 3 个信件工具；
-> 可选 `You` 只在主连接器按独立开关动态注册/移除。
-> `/mcp-extra` 在 2.8.5–3.1.0 期间曾退役，3.2.0 起恢复，并与主连接器共享鉴权、体积限制和 CSRF 边界。
+> **单连接器（3.4.0 起）**：16 个工具全在 `/mcp` 上，可选 `You` 按独立开关在其上动态注册/移除。
+> 信件 3.2.0 曾拆到 `/mcp-extra`，3.4.0 并回主链路，该端点再次退役返回 404。
 > - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
-> - 主连接器低频 6 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
-> - 信件连接器 3 个 —— `letter_write` / `letter_lock_update` / `letter_read`
+> - 低频 6 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
+> - 信件 3 个 —— `letter_write` / `letter_lock_update` / `letter_read`
 >
 > 3.0.0 删除了 source 回顾 4 个与 relation 4 个工具，见 §3.3.1。
 
@@ -1748,7 +1747,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；主 `/mcp` 固定 13 个记忆工具并动态显隐 `You`，`/mcp-extra` 固定 3 个信件工具；URL 末尾必须对应所需连接器路径 |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；唯一连接器 `/mcp` 固定 16 个工具并动态显隐 `You`；URL 末尾必须是 `/mcp` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |

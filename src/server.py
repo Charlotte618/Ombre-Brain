@@ -8,8 +8,8 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 16 个基础 MCP 工具：主连接器 `/mcp` 提供 13 个记忆工具，
-  `/mcp-extra` 提供 letter_write/letter_lock_update/letter_read；每个入口
+- 启动后在唯一连接器 `/mcp` 上暴露 16 个基础 MCP 工具（含
+  letter_write/letter_lock_update/letter_read）；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
   breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
   复杂的工具，全塞一个 breath() 会导致它常年加载不上（见 issue #17）。
@@ -328,9 +328,9 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's HTTP endpoint is externally reachable
 # stdio mode ignores host (no network)
 #
-# 主连接器 /mcp 直接注册 13 个记忆工具；3 个信件工具注册到 /mcp-extra。
-# 两个实例都不依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
-# 稳定暴露各自的完整工具清单。
+# 唯一连接器 /mcp 直接注册全部 16 个工具（信件三件套 3.4.0 已并回）。
+# 不依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能稳定暴露
+# 完整工具清单。
 #
 # 远程 Streamable HTTP 固定返回单个 JSON-RPC 对象，并且不要求客户端在
 # initialize 后保存/回传 Mcp-Session-Id。Kelivo 等会静默吞掉 tools/list 异常的
@@ -1197,8 +1197,8 @@ for _strict_tool_name in (
         )
 
 
-# You is the only dynamically exposed tool. It lives on the 13-tool main
-# connector; the three letter tools on /mcp-extra remain unchanged.
+# You is the only dynamically exposed tool. It lives on the sole 16-tool
+# connector /mcp, alongside the three letter tools merged back in 3.4.0.
 you_tool_gate = YouToolGate(mcp, _t_you.dispatch)
 try:
     you_tool_gate.sync(you_service.status().enabled)
@@ -1359,7 +1359,7 @@ if __name__ == "__main__":
             # 从 info 升级为显著 WARNING，避免用户无意识地把大脑暴露到公网。
             logger.warning(
                 "=" * 60 + "\n"
-                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 与 /mcp-extra 无需任何令牌即可直连，\n"
+                "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
                 "    16 个基础工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"

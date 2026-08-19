@@ -28,12 +28,13 @@
 
 ## 我的连接器
 
-我有十六种基础能力，按语义分在两个 MCP 连接器里：
+我有十六种基础能力，全在同一个 MCP 连接器 `/mcp` 上：
 
-- **主连接器 `/mcp`**：7 个高频记忆工具 `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `dream` / `trace`，以及 6 个低频记忆工具 `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
-- **信件连接器 `/mcp-extra`**：`letter_write` / `letter_lock_update` / `letter_read`
+- 7 个高频记忆工具 `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `dream` / `trace`
+- 6 个低频记忆工具 `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
+- 3 个信件工具 `letter_write` / `letter_lock_update` / `letter_read`
 
-连上 `/mcp` 就拥有全部记忆能力；需要写信、读信或修改时间锁时，再连接 `/mcp-extra`。
+连上 `/mcp` 就拥有全部能力，不需要第二条连接。信件 3.2.0 曾拆到 `/mcp-extra`，3.4.0 并回主链路，那个端点现在返回 404。
 
 ---
 
