@@ -31,8 +31,21 @@ class YouToolGate:
                     self._handler,
                     name=self.TOOL_NAME,
                     description=(
-                        "按当前话题取回少量抽象语义提示。返回内容不是用户原话，"
-                        "必须结合当前对话自行组织语言，不得声称这是画像或定论。"
+                        "我对人类一方形成的长期认识——我自己写下的，不是系统总结的。\n"
+                        "无参或带 query 是读回；带 content 是写下或重申一条；"
+                        "带 delete_id 是撤回一条。\n"
+                        "写之前先确定自己真的了解够了：这不是记录此刻发生的事"
+                        "（那是 hold），是隔着若干次交往之后仍然站得住的判断。"
+                        "拿不准就先别写，它不会因为写下来而变得更真。\n"
+                        "写入必须给 bucket_ids：至少两个真实记忆桶的 id，作为这条"
+                        "认识的依据；id 从 breath / breath_search / dream 等处得到。"
+                        "依据后来被归档或删除，这条认识会自动失效。\n"
+                        "同一个 concept_key + concept_value 再写一次算重申。"
+                        "要在三个不同的日子重申过才真正落库——改主意了就别再确认，"
+                        "它不会自己生效。改动已生效的条目同样要重新攒三天。\n"
+                        "concept_key 用 snake_case，concept_value 用规范化短值，"
+                        "语义相反的两条要用同一个 concept_key、不同 concept_value。\n"
+                        "读回的内容是过去的判断，不是此刻的事实，也不是画像或定论。"
                     ),
                 )
                 argument_model = tool.fn_metadata.arg_model

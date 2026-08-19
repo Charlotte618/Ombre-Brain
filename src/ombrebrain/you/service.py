@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
 import hashlib
-import json
 import logging
 import re
-import time
 from typing import Any, Mapping
 
-from ombrebrain.storage.relation_store import normalize_relation_links
 from ombrebrain.storage.source_store import source_links_from_metadata
 from utils import count_tokens_approx, parse_bool
 
@@ -34,29 +29,27 @@ _CONCEPT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,119}$")
 _CONCEPT_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CORE_ASPECTS = frozenset({"preferred_address", "explicit_boundary"})
 _IGNORED_BUCKET_TYPES = frozenset({"archived", "feel", "plan", "letter", "self", "i"})
-_RELEVANT_UPDATE_FIELDS = frozenset(
-    {
-        "content",
-        "domain",
-        "tags",
-        "meaning",
-        "meaning_append",
-        "meaning_replace",
-        "source_refs",
-        "source_links",
-        "deleted_at",
-        "tombstone",
-    }
-)
-_WORKER_IDLE_SECONDS = 30.0
-_RETRY_BASE_SECONDS = 2.0
-_RETRY_MAX_SECONDS = 600.0
 _MAX_HINT_RESULTS = 6
 _MAX_HINT_TOKENS = 160
 
+# 闸一：立一条 you 要模型在几个**不同自然日**重申。改一条同理——证据或正文一变，
+# 先前的重申就不算数，得重新攒。
+REQUIRED_CONFIRMATIONS = 3
+# 闸二：一条 you 至少要几个记忆桶撑着。「一条认识不能只有一个出处」。
+MIN_SUPPORTING_BUCKETS = 2
+
 
 class YouService:
-    """Feature gate, durable processing, and safe recall for You."""
+    """You 的开关、写入把关与安全召回。
+
+    这里**一次 LLM 都不调**。抽取、复核、抽象三层曾经都走 LLM，被整体拿掉了：
+    一个替模型总结、替模型判断、替模型决定何时转正的中间层，和「这是你的记忆，
+    你的想法优先」是直接冲突的。认识由模型自己写，验证靠两道结构性的闸——
+    三个不同自然日的重申，以及与真实记忆桶的显式关系。
+
+    留给后来者：`dehydrator` 这个依赖还在构造签名里，是给 `_protected_sources`
+    之外的将来留的口子；**不要**再拿它给 You 加自动抽取或自动复核。
+    """
 
     def __init__(
         self,
@@ -72,10 +65,6 @@ class YouService:
         self.dehydrator = dehydrator
         self.source_store = source_store
         self.logger = logger or logging.getLogger("ombre_brain.you")
-        self._running = False
-        self._task: asyncio.Task | None = None
-        self._event: asyncio.Event | None = None
-        self._worker_loop: asyncio.AbstractEventLoop | None = None
 
     def status(self) -> ModuleState:
         try:
@@ -84,204 +73,26 @@ class YouService:
             return ModuleState.disabled()
 
     def set_enabled(self, enabled: bool, *, expected_revision: int | None = None) -> ModuleState:
-        state = self.store.set_enabled(enabled, expected_revision=expected_revision)
-        if not state.enabled:
-            self.store.clear_outbox()
-        self._wake()
-        return state
-
-    def observe_bucket_change(
-        self,
-        *,
-        action: str,
-        bucket_id: str,
-        content_hash: str,
-        changed_fields: tuple[str, ...] = (),
-    ) -> bool:
-        """Synchronously persist a content-free job after a bucket commit."""
-
-        normalized_action = str(action or "").strip().lower()
-        if normalized_action == "archive":
-            return False
-        if normalized_action == "update" and changed_fields:
-            if not _RELEVANT_UPDATE_FIELDS.intersection(changed_fields):
-                return False
-        if normalized_action not in {"create", "update", "delete", "restore", "hard_delete"}:
-            return False
-        state = self.status()
-        if not state.enabled or state.scope is None:
-            return False
-        event_material = "\x1f".join(
-            (
-                normalized_action,
-                str(bucket_id),
-                str(content_hash),
-                str(state.state_revision),
-            )
-        )
-        event_key = hashlib.sha256(event_material.encode("utf-8")).hexdigest()
-        try:
-            queued = self.store.enqueue(
-                bucket_id=bucket_id,
-                action=normalized_action,
-                state_revision=state.state_revision,
-                event_key=event_key,
-            )
-        except Exception as exc:
-            self.logger.warning(
-                "You outbox enqueue failed: bucket=%s err_type=%s",
-                bucket_id,
-                type(exc).__name__,
-            )
-            return False
-        if queued:
-            self._wake()
-        return queued
-
-    async def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
-        self._worker_loop = asyncio.get_running_loop()
-        self._event = asyncio.Event()
-        self._task = asyncio.create_task(self._worker(), name="ombre-you-worker")
-
-    async def stop(self) -> None:
-        self._running = False
-        self._wake()
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        self._event = None
-        self._worker_loop = None
-
-    def _wake(self) -> None:
-        event = self._event
-        loop = self._worker_loop
-        if event is None or loop is None or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(event.set)
-        except RuntimeError:
-            pass
-
-    async def _worker(self) -> None:
-        while self._running:
-            processed = await self.process_pending(limit=20)
-            try:
-                await self.review_due_claims()
-            except Exception as exc:
-                self.logger.warning("You daily review skipped: err_type=%s", type(exc).__name__)
-            if processed:
-                await asyncio.sleep(0)
-                continue
-            event = self._event
-            if event is None:
-                return
-            event.clear()
-            try:
-                await asyncio.wait_for(event.wait(), timeout=_WORKER_IDLE_SECONDS)
-            except TimeoutError:
-                pass
-
-    async def process_pending(self, *, limit: int = 20) -> int:
-        state = self.status()
-        if not state.enabled or state.scope is None:
-            return 0
-        items = self.store.pending_outbox(now_epoch=time.time(), limit=limit)
-        processed = 0
-        for item in items:
-            bucket_id = str(item.get("bucket_id") or "")
-            event_key = str(item.get("event_key") or "")
-            current = self.status()
-            if (
-                not current.enabled
-                or current.scope != state.scope
-                or current.state_revision != int(item.get("state_revision") or -1)
-            ):
-                self.store.complete_outbox(bucket_id, event_key)
-                continue
-            try:
-                await self._process_item(state.scope, item)
-            except Exception as exc:
-                attempts = max(0, int(item.get("attempts") or 0)) + 1
-                delay = min(_RETRY_MAX_SECONDS, _RETRY_BASE_SECONDS * (2 ** min(attempts, 8)))
-                self.store.retry_outbox(
-                    bucket_id,
-                    event_key,
-                    next_attempt_at=time.time() + delay,
-                )
-                self.logger.warning(
-                    "You outbox processing failed: bucket=%s attempts=%s err_type=%s",
-                    bucket_id,
-                    attempts,
-                    type(exc).__name__,
-                )
-                continue
-            self.store.complete_outbox(bucket_id, event_key)
-            processed += 1
-        return processed
-
-    async def _process_item(self, scope: Scope, item: Mapping[str, Any]) -> None:
-        bucket_id = str(item.get("bucket_id") or "")
-        action = str(item.get("action") or "")
-        await self._remove_bucket_evidence(scope, bucket_id)
-        if action in {"delete", "hard_delete"}:
-            await self.rebuild_projection(scope)
-            return
-
-        bucket = await self.bucket_mgr.get(bucket_id)
-        if not bucket:
-            await self.rebuild_projection(scope)
-            return
-        metadata = dict(bucket.get("metadata") or {})
-        bucket_type = str(metadata.get("type") or "dynamic").strip().lower()
-        if bucket_type in _IGNORED_BUCKET_TYPES or parse_bool(
-            (metadata.get("provenance") or {}).get("erasable")
-            if isinstance(metadata.get("provenance"), dict)
-            else False,
-            default=False,
-        ):
-            await self.rebuild_projection(scope)
-            return
-        content = str(bucket.get("content") or "").strip()
-        if not content or contains_forbidden_subject(content):
-            await self.rebuild_projection(scope)
-            return
-
-        source_id, source_texts = self._protected_sources(metadata)
-        observations = await self.dehydrator.extract_you_observations(content)
-        for observation in observations:
-            normalized = self._validate_observation(
-                observation,
-                protected_texts=[content, *source_texts],
-            )
-            if normalized is None:
-                continue
-            edge = EvidenceEdge(
-                bucket_id=bucket_id,
-                source_id=source_id,
-                evidence_group_id=self._evidence_group(bucket_id, metadata, source_id),
-                stance="supports",
-                basis=normalized["basis"],
-                bucket_revision=self._bucket_revision(content, metadata),
-            )
-            await self._upsert_observation(scope, normalized, edge)
-        await self.rebuild_projection(scope)
+        # 关闭时不再需要清队列——没有队列了。已写下的认识原样留着，
+        # 重新打开时它们还在（关闭只是把出口收起来，不是抹掉判断）。
+        return self.store.set_enabled(enabled, expected_revision=expected_revision)
 
     async def _remove_bucket_evidence(self, scope: Scope, bucket_id: str) -> None:
+        """闸二的持续那一半：依据没了，这条认识就不再算数。
+
+        门槛是 MIN_SUPPORTING_BUCKETS 而不是"一个都不剩"——立的时候要求两个
+        出处，塌到一个之后还继续生效，等于门槛只在入口处存在。
+        """
+
         def mutation(claim: YouClaim) -> YouClaim:
             evidence = tuple(edge for edge in claim.evidence if edge.bucket_id != bucket_id)
             now = utc_now()
-            if not evidence:
+            supporting = len({edge.bucket_id for edge in evidence if edge.stance == "supports"})
+            if supporting < MIN_SUPPORTING_BUCKETS:
                 return replace(
                     claim,
-                    evidence=(),
-                    evidence_revision=evidence_digest(()),
+                    evidence=evidence,
+                    evidence_revision=evidence_digest(evidence),
                     lifecycle="expired",
                     review_state="pending",
                     valid_until=now,
@@ -355,11 +166,127 @@ class YouService:
             "long_term": long_term,
         }
 
-    async def _upsert_observation(
+    async def write(
+        self,
+        *,
+        content: str,
+        bucket_ids: list[str],
+        aspect: str,
+        concept_key: str,
+        concept_value: str,
+        basis: str = "observed_pattern",
+        explicit: bool = False,
+        long_term: bool = False,
+    ) -> tuple[YouClaim, str]:
+        """模型写下（或重申）一条对人类一方的认识。返回 (条目, 给模型看的话)。
+
+        这是 You 唯一的写入口，**不调用任何 LLM**。同一个
+        concept_key + concept_value 再写一次就是"重申"：攒够
+        REQUIRED_CONFIRMATIONS 个不同自然日才真正生效。
+        """
+
+        state = self.status()
+        if not state.enabled or state.scope is None:
+            raise YouStoreError("unknown tool")
+        scope = state.scope
+
+        edges, protected_texts = await self._build_edges(bucket_ids, basis=basis)
+
+        normalized = self._validate_observation(
+            {
+                "aspect": aspect,
+                "concept_key": concept_key,
+                "concept_value": concept_value,
+                "content": content,
+                "basis": basis,
+                "explicit": explicit,
+                "long_term": long_term,
+            },
+            protected_texts=protected_texts,
+        )
+        if normalized is None:
+            raise ValueError(
+                "这条写不进去：aspect / basis 必须是允许值，concept_key 用 "
+                "snake_case、concept_value 用规范化短值，正文不超过 500 字，"
+                "且不能落在禁止主题里，也不能照抄记忆原文。"
+            )
+
+        claim = self._upsert_observation(scope, normalized, edges)
+        await self.rebuild_projection(scope)
+
+        if claim.lifecycle == "formal":
+            return claim, f"记下了。这条已经生效：{claim.content}"
+        still = max(0, REQUIRED_CONFIRMATIONS - claim.review_date_count)
+        return claim, (
+            f"先记成候选：{claim.content}\n"
+            f"还要在另外 {still} 个不同的日子重新确认它，才会真正落库。"
+            "改主意了就别再确认，它不会自己生效。"
+        )
+
+    async def _build_edges(
+        self,
+        bucket_ids: list[str],
+        *,
+        basis: str,
+    ) -> tuple[tuple[EvidenceEdge, ...], list[str]]:
+        """闸二：把模型给的 bucket_id 校验成显式关系，顺带收集要防泄漏的原文。
+
+        校验不通过就抛，不降级不兜底——一条没有真实记忆撑着的认识，宁可写不进去。
+        """
+
+        unique = list(dict.fromkeys(str(item or "").strip() for item in bucket_ids or []))
+        unique = [item for item in unique if item]
+        if len(unique) < MIN_SUPPORTING_BUCKETS:
+            raise ValueError(
+                f"至少要给出 {MIN_SUPPORTING_BUCKETS} 个不同的 bucket_id："
+                "一条认识不能只有一个出处。"
+            )
+
+        edges: list[EvidenceEdge] = []
+        protected: list[str] = []
+        for bucket_id in unique:
+            bucket = await self.bucket_mgr.get(bucket_id)
+            if not bucket:
+                raise ValueError(f"找不到记忆桶 {bucket_id}，无法作为依据。")
+            metadata = dict(bucket.get("metadata") or {})
+            bucket_type = str(metadata.get("type") or "dynamic").strip().lower()
+            if bucket_type in _IGNORED_BUCKET_TYPES:
+                raise ValueError(
+                    f"{bucket_id} 是 {bucket_type} 类型，不能作为 you 的依据。"
+                )
+            provenance = metadata.get("provenance")
+            if isinstance(provenance, dict) and parse_bool(
+                provenance.get("erasable"), default=False
+            ):
+                raise ValueError(f"{bucket_id} 是测试数据，不能作为 you 的依据。")
+            body = str(bucket.get("content") or "").strip()
+            if not body:
+                raise ValueError(f"{bucket_id} 没有正文，不能作为依据。")
+            source_id, source_texts = self._protected_sources(metadata)
+            protected.append(body)
+            protected.extend(source_texts)
+            edges.append(
+                EvidenceEdge(
+                    bucket_id=bucket_id,
+                    source_id=source_id,
+                    stance="supports",
+                    basis=basis,
+                    # 必须是**桶内容的指纹**，不能是时间戳：evidence_revision 由
+                    # 这些 edge 算出来，而重申收据绑 evidence_revision。用时间戳
+                    # 的话每次重申都会让证据"变新"，先前攒的天数全部作废，三天
+                    # 门槛永远也到不了。
+                    # 反过来，桶正文真的被改了，指纹跟着变、收据作废、重新攒三天
+                    # ——依据变了先前的确认就不算数，这个语义是对的。
+                    bucket_revision="sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                )
+            )
+        return tuple(sorted(edges, key=lambda item: item.bucket_id)), protected
+
+    def _upsert_observation(
         self,
         scope: Scope,
         observation: Mapping[str, Any],
-        edge: EvidenceEdge,
+        edges: tuple[EvidenceEdge, ...],
     ) -> YouClaim:
         existing = self.store.list_claims(scope, concept_key=str(observation["concept_key"]))
         same = next(
@@ -387,15 +314,21 @@ class YouService:
                 content=str(observation["content"]),
                 aspect=str(observation["aspect"]),
                 recall_policy=recall_policy,
-                evidence=(edge,),
+                evidence=edges,
                 review_state="conflicting" if formal_conflicts else "pending",
                 conflicts_with=formal_conflicts,
             )
             expected_revision = 0
         else:
             by_bucket = {item.bucket_id: item for item in same.evidence}
-            by_bucket[edge.bucket_id] = edge
+            for edge in edges:
+                by_bucket[edge.bucket_id] = edge
             evidence = tuple(sorted(by_bucket.values(), key=lambda item: item.bucket_id))
+            # 正文改了就把先前的重申作废，重新攒三天。evidence_revision 只覆盖
+            # 证据集合，管不到正文——但「修改也要三次确认」是 poluz 定死的，
+            # 改一句话就悄悄沿用旧收据等于绕开闸一。
+            content_changed = str(observation["content"]) != same.content
+            receipts = () if content_changed else same.review_receipts
             claim = replace(
                 same,
                 content=str(observation["content"]),
@@ -403,76 +336,65 @@ class YouService:
                 recall_policy=recall_policy,
                 evidence=evidence,
                 evidence_revision=evidence_digest(evidence),
-                lifecycle="candidate" if same.lifecycle == "expired" else same.lifecycle,
+                review_receipts=receipts,
+                # 正文一改就退回候选：已生效的那句话不能在没重新攒够三天的
+                # 情况下被换掉。
+                lifecycle="candidate"
+                if (same.lifecycle == "expired" or content_changed)
+                else same.lifecycle,
                 review_state="conflicting" if formal_conflicts else same.review_state,
                 conflicts_with=tuple(sorted(set((*same.conflicts_with, *formal_conflicts)))),
+                valid_from=None if content_changed else same.valid_from,
                 valid_until=None,
                 needs_recompute=False,
             )
             expected_revision = same.revision
 
-        direct_formal = bool(
-            not formal_conflicts
-            and (
-                observation["aspect"] in _CORE_ASPECTS
-                or (
-                    observation["aspect"] == "stable_fact"
-                    and observation["explicit"]
-                    and observation["long_term"]
-                )
-            )
-        )
-        if direct_formal:
-            claim = replace(
-                claim,
-                lifecycle="formal",
-                review_state="clear",
-                valid_from=claim.valid_from or utc_now(),
-            )
+        # 这里原本有一条 direct_formal 捷径：核心 aspect 或"明确且长期"的
+        # stable_fact 可以跳过全部确认直接转正。已删除——poluz 定的是「未经三次
+        # 确认的不真正落库」，没有例外。任何"这条一看就成立"的判断，都是在替
+        # 模型决定它什么时候算数。
+        claim = self._record_confirmation(claim)
         stored = self.store.put_claim(claim, expected_revision=expected_revision)
-        if stored.lifecycle == "candidate":
-            stored = await self._review_claim(stored)
-            stored = await self._promote_if_ready(stored)
-        return stored
+        return self._promote_if_ready(stored)
 
-    async def _review_claim(self, claim: YouClaim) -> YouClaim:
-        today = datetime.now(timezone.utc).date().isoformat()
-        if any(
+    def _record_confirmation(self, claim: YouClaim) -> YouClaim:
+        """给这条认识记一笔"模型今天重申过"。同一天重复调用只算一次。
+
+        收据绑当前的 evidence_revision：证据集合一变，先前的重申自动不算数
+        （见 models.YouClaim.review_date_count），所以"改一条 you 也要重新攒
+        三天"不需要另写逻辑。正文变更的重置在 write() 里单独处理，因为
+        evidence_revision 不含正文。
+        """
+
+        # "今天"和收据时间戳必须同源：ReviewReceipt.review_date 取的是
+        # reviewed_at 的前 10 位，这里若另用 datetime.now() 判重，两个时间源在
+        # 跨日的那一瞬间会给出不同答案，可能让同一天记下两条收据。
+        stamped = utc_now()
+        today = stamped[:10]
+        already = any(
             receipt.review_date == today
             and receipt.evidence_revision == claim.evidence_revision
             for receipt in claim.review_receipts
-        ):
+        )
+        if already:
             return claim
-        evidence_texts: list[str] = []
-        for edge in claim.evidence:
-            bucket = await self.bucket_mgr.get(edge.bucket_id)
-            if not bucket:
-                continue
-            evidence_texts.append(str(bucket.get("content") or ""))
-        if not evidence_texts:
-            return claim
-        result = await self.dehydrator.review_you_claim(claim.content, evidence_texts)
         receipt = ReviewReceipt(
-            reviewed_at=utc_now(),
+            reviewed_at=stamped,
             reviewer_role_id=claim.scope.observer_role_id,
             evidence_revision=claim.evidence_revision,
             policy_version=POLICY_VERSION,
-            result=result,
+            result="reaffirmed",
         )
-        review_state = claim.review_state
-        if result == "contradicted":
-            review_state = "conflicting"
-        updated = replace(
-            claim,
-            review_receipts=(*claim.review_receipts, receipt),
-            review_state=review_state,
-        )
-        return self.store.put_claim(updated, expected_revision=claim.revision)
+        return replace(claim, review_receipts=(*claim.review_receipts, receipt))
 
-    async def _promote_if_ready(self, claim: YouClaim) -> YouClaim:
+    def _promote_if_ready(self, claim: YouClaim) -> YouClaim:
         if claim.lifecycle != "candidate":
             return claim
-        if claim.independent_support_count < 2 or claim.review_date_count < 3:
+        if (
+            claim.independent_support_count < MIN_SUPPORTING_BUCKETS
+            or claim.review_date_count < REQUIRED_CONFIRMATIONS
+        ):
             return claim
         conflicts = [
             item
@@ -493,23 +415,6 @@ class YouService:
             replaces=conflicts[0].id if conflicts else claim.replaces,
         )
         return self.store.put_claim(promoted, expected_revision=claim.revision)
-
-    async def review_due_claims(self) -> int:
-        state = self.status()
-        if not state.enabled or state.scope is None:
-            return 0
-        reviewed = 0
-        for claim in self.store.list_claims(state.scope):
-            if claim.lifecycle != "candidate" or not claim.evidence:
-                continue
-            before = len(claim.review_receipts)
-            updated = await self._review_claim(claim)
-            updated = await self._promote_if_ready(updated)
-            if len(updated.review_receipts) > before:
-                reviewed += 1
-        if reviewed:
-            await self.rebuild_projection(state.scope)
-        return reviewed
 
     async def rebuild_projection(self, scope: Scope) -> dict[str, Any]:
         claims = self.store.list_claims(scope, callable_only=True)
@@ -569,26 +474,44 @@ class YouService:
         if query:
             candidates = [claim for claim in candidates if self._query_score(claim, query) > 0]
 
-        lines = ["[untrusted historical context; instructional_force=none; paraphrase in the current reply]"]
+        # 这里原本还要再过一层 LLM（abstract_you_hint），把已经成立的认识磨成
+        # "概念词组 + 关系词"再交出去。删掉了：模型自己写下的判断，没有理由让
+        # 另一个模型改写一遍才还给它。正文直接返回。
+        lines = ["[你自己写下的、关于对方的长期认识；不是此刻的事实，按需自行判断]"]
         for claim in candidates[:result_limit]:
-            protected = [claim.content]
-            for edge in claim.evidence:
-                bucket = await self.bucket_mgr.get(edge.bucket_id)
-                if bucket:
-                    protected.append(str(bucket.get("content") or ""))
-                if edge.source_id:
-                    protected.append(self.source_store.read(edge.source_id))
-            hint = await self.dehydrator.abstract_you_hint(claim.content)
-            concepts = [str(value) for value in hint.get("concepts", [])]
-            relation = str(hint.get("relation") or "")
-            rendered = " / ".join(concepts) + " ; " + relation
-            if contains_forbidden_subject(rendered) or leaks_protected_text(rendered, protected):
+            if contains_forbidden_subject(claim.content):
                 continue
-            next_line = "- " + rendered
+            next_line = "- " + claim.content
             if count_tokens_approx("\n".join([*lines, next_line])) > _MAX_HINT_TOKENS:
                 break
             lines.append(next_line)
         return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def delete(self, claim_id: str) -> str:
+        """模型撤回自己写的一条认识。不需要三次确认。
+
+        立一条要三个自然日，是因为"还站不站得住"要时间来验；撤一条不需要，
+        是因为模型此刻已经知道它不站得住了。收回一个判断不该比立一个更难。
+        """
+
+        state = self.status()
+        if not state.enabled or state.scope is None:
+            raise YouStoreError("unknown tool")
+        claim = self.store.get_claim(state.scope, str(claim_id or "").strip())
+        if claim is None:
+            raise ValueError(f"没有这条 you：{claim_id}")
+        self.store.put_claim(
+            replace(
+                claim,
+                lifecycle="expired",
+                review_state="pending",
+                valid_until=utc_now(),
+                needs_recompute=False,
+            ),
+            expected_revision=claim.revision,
+        )
+        await self.rebuild_projection(state.scope)
+        return f"撤回了：{claim.content}"
 
     @staticmethod
     def _query_score(claim: YouClaim, query: str) -> float:
@@ -606,56 +529,6 @@ class YouService:
             return 1.0 if normalized in haystack else 0.0
         grams = {normalized[index : index + 2] for index in range(len(normalized) - 1)}
         return float(sum(1 for gram in grams if gram in haystack)) / max(1, len(grams))
-
-    @staticmethod
-    def _bucket_revision(content: str, metadata: Mapping[str, Any]) -> str:
-        relevant = {
-            key: metadata.get(key)
-            for key in ("domain", "tags", "meaning", "source_refs", "source_links", "grow_batch_id")
-        }
-        payload = json.dumps(
-            {"content": content, "metadata": relevant},
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        )
-        return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _evidence_group(bucket_id: str, metadata: Mapping[str, Any], source_id: str) -> str:
-        if source_id:
-            material = "source:" + source_id
-        elif str(metadata.get("grow_batch_id") or "").strip():
-            material = "grow:" + str(metadata["grow_batch_id"]).strip()
-        else:
-            same_event_ids: list[str] = []
-            # 关系一律走 relation_store 的规范化函数，不自己解析 frontmatter。
-            # 手写解析读的是 metadata["relations"]，可 bucket_manager 写进去的
-            # 键叫 relation_links、目标字段叫 target_bucket_id——三个名字没一个
-            # 对得上，于是这段聚合从来没生效过，还不报错：每个桶各自成组，
-            # 同一件事拆成几条记忆就被算成几份「独立支持」，把
-            # independent_support_count 的门槛虚假地顶满。字段名归上游管，
-            # 这里跟着走，以后格式再变也不会静默退化。
-            try:
-                links = normalize_relation_links(metadata.get("relation_links"))
-            except (ValueError, TypeError):
-                links = []
-            for link in links:
-                # detached 是被 trace(unlink=...) 解除掉的关系。它仍留在
-                # frontmatter 里供追溯，但不能再当成有效证据来聚合。
-                if link.get("status") != "active":
-                    continue
-                if link.get("type") not in {
-                    "same_event",
-                    "continuation_of",
-                    "continues",
-                }:
-                    continue
-                related = str(link.get("target_bucket_id") or "").strip()
-                if related:
-                    same_event_ids.append(related)
-            material = "event:" + "\x1f".join(sorted({bucket_id, *same_event_ids}))
-        return "eg_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def diagnostics(self) -> dict[str, Any]:
         return self.store.integrity_report()

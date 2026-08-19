@@ -138,8 +138,18 @@ class ModuleState:
 
 @dataclass(frozen=True)
 class EvidenceEdge:
+    """一条 you 认识与一个记忆桶的显式关系。
+
+    edge 由模型写 you 的时候自己指定，不是系统从记忆里抽出来的——这是整个
+    模块的地基（见 dev 侧设计文档「这是你的记忆，你的想法优先」）。
+
+    这里原本还有一个 evidence_group_id，用来把"同一件事拆成的多个桶"聚成一组，
+    免得同一件事被算成多份独立支持。那是自动抽取时代的产物：系统不知道模型
+    心里算不算同一件事，只能靠桶间关系去猜。现在模型自己挑要绑哪几个桶，
+    "算不算独立"由它自己决定，这个字段没有了意义。
+    """
+
     bucket_id: str
-    evidence_group_id: str
     stance: str
     basis: str
     bucket_revision: str
@@ -147,11 +157,6 @@ class EvidenceEdge:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "bucket_id", _require_text(self.bucket_id, "bucket_id", limit=200))
-        object.__setattr__(
-            self,
-            "evidence_group_id",
-            _require_text(self.evidence_group_id, "evidence_group_id", limit=200),
-        )
         stance = str(self.stance or "").strip().lower()
         basis = str(self.basis or "").strip().lower()
         if stance not in VALID_STANCES:
@@ -171,14 +176,13 @@ class EvidenceEdge:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "EvidenceEdge":
         return cls(**{key: value.get(key, "") for key in (
-            "bucket_id", "evidence_group_id", "stance", "basis", "bucket_revision", "source_id"
+            "bucket_id", "stance", "basis", "bucket_revision", "source_id"
         )})
 
     def to_dict(self) -> dict[str, str]:
         return {
             "bucket_id": self.bucket_id,
             "source_id": self.source_id,
-            "evidence_group_id": self.evidence_group_id,
             "stance": self.stance,
             "basis": self.basis,
             "bucket_revision": self.bucket_revision,
@@ -187,6 +191,18 @@ class EvidenceEdge:
 
 @dataclass(frozen=True)
 class ReviewReceipt:
+    """模型重申一条 you 的收据。一天最多记一条。
+
+    原本这是 LLM 复核的收据（result 是另一个模型判"还站不站得住"）。现在
+    复核那层 LLM 已经拿掉，收据记的是模型自己在某一天重新确认了这条认识：
+    立一条 you 要三个不同自然日的重申，就是靠这些收据数出来的。
+
+    result 保留三值是为了兼容既有存量与 store 的解析，但语义变了：
+    - reaffirmed：模型这天重新确认了它（原 remains_plausible）
+    - contradicted / insufficient：留给模型将来主动标记推翻/存疑用，
+      当前写入路径不产生这两种。
+    """
+
     reviewed_at: str
     reviewer_role_id: str
     evidence_revision: str
@@ -204,7 +220,9 @@ class ReviewReceipt:
             _require_text(self.evidence_revision, "evidence_revision", limit=100),
         )
         result = str(self.result or "").strip().lower()
-        if result not in {"remains_plausible", "contradicted", "insufficient"}:
+        # reaffirmed 是新语义；remains_plausible 是它的历史名字，继续收下，
+        # 免得已经落库的存量收据在升级后突然读不出来。
+        if result not in {"reaffirmed", "remains_plausible", "contradicted", "insufficient"}:
             raise ValueError("invalid review result")
         object.__setattr__(self, "result", result)
         object.__setattr__(
@@ -330,15 +348,27 @@ class YouClaim:
 
     @property
     def independent_support_count(self) -> int:
-        return len({edge.evidence_group_id for edge in self.evidence if edge.stance == "supports"})
+        """撑着这条认识的记忆桶有几个（闸二，门槛见 MIN_SUPPORTING_BUCKETS）。
+
+        按 bucket_id 去重，不再按 evidence_group_id——模型自己挑的桶，算不算
+        独立由它自己决定，系统不替它把"同一件事"并起来。
+        """
+
+        return len({edge.bucket_id for edge in self.evidence if edge.stance == "supports"})
 
     @property
     def review_date_count(self) -> int:
+        """模型在几个不同自然日重申过这条（闸一，门槛 REQUIRED_CONFIRMATIONS）。
+
+        绑定 evidence_revision：证据集合一变，先前的重申就不算数了，得按新的
+        证据重新攒三天。改一条 you 因此天然也要三天，不用另写一套逻辑。
+        """
+
         return len(
             {
                 receipt.review_date
                 for receipt in self.review_receipts
-                if receipt.result == "remains_plausible"
+                if receipt.result in {"reaffirmed", "remains_plausible"}
                 and receipt.evidence_revision == self.evidence_revision
             }
         )

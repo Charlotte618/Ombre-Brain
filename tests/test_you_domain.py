@@ -13,15 +13,13 @@ from ombrebrain.you import (
     contains_forbidden_subject,
     leaks_protected_text,
 )
-from ombrebrain.you.models import evidence_digest, utc_now
-from ombrebrain.you.service import YouService
+from ombrebrain.you.models import evidence_digest
 
 
 def _edge(bucket_id: str = "memory-1") -> EvidenceEdge:
     return EvidenceEdge(
         bucket_id=bucket_id,
         source_id="src_" + "a" * 64,
-        evidence_group_id="eg_event_1",
         stance="supports",
         basis="explicit_statement",
         bucket_revision="sha256:" + "b" * 64,
@@ -102,36 +100,6 @@ def test_claim_revision_and_projection_staleness_are_atomic(tmp_path):
         store.put_claim(changed, expected_revision=1)
 
 
-def test_outbox_rejects_stale_or_disabled_revision(tmp_path):
-    store = YouStore(tmp_path)
-    state = store.set_enabled(True)
-
-    assert store.enqueue(
-        bucket_id="memory-1",
-        action="create",
-        state_revision=state.state_revision,
-        event_key="event-1",
-    ) is True
-    assert store.enqueue(
-        bucket_id="memory-2",
-        action="create",
-        state_revision=state.state_revision + 1,
-        event_key="event-2",
-    ) is False
-
-    store.set_enabled(False, expected_revision=state.state_revision)
-    assert store.pending_outbox(now_epoch=10**12) == [
-        {
-            "bucket_id": "memory-1",
-            "action": "create",
-            "state_revision": state.state_revision,
-            "event_key": "event-1",
-            "attempts": 0,
-            "next_attempt_at": 0.0,
-        }
-    ]
-
-
 def test_corrupt_state_fails_closed(tmp_path):
     root = tmp_path / ".you"
     root.mkdir()
@@ -187,73 +155,67 @@ def test_normalized_leak_guard_blocks_source_copy_and_allows_atomic_values():
     assert leaks_protected_text("2026-08-18", ["日期是 2026-08-18"]) is False
 
 
-def test_claim_state_derives_independent_evidence_and_review_dates():
+def test_supporting_buckets_are_counted_per_bucket_not_per_group():
+    """闸二的计数：按 bucket 去重。
+
+    原来按 evidence_group_id 去重，是自动抽取时代的产物——系统要自己猜"这几个
+    桶算不算同一件事"。现在桶由模型自己挑，算不算独立由它自己定。
+    """
     scope = Scope.new()
-    first = _edge("memory-1")
-    second = replace(_edge("memory-2"), evidence_group_id="eg_event_2")
-    revision = evidence_digest((first, second))
-    receipts = (
-        ReviewReceipt(utc_now(), scope.observer_role_id, revision, "remains_plausible"),
-        ReviewReceipt("2026-08-17T10:00:00+00:00", scope.observer_role_id, revision, "remains_plausible"),
-        ReviewReceipt("2026-08-17T20:00:00+00:00", scope.observer_role_id, revision, "remains_plausible"),
-    )
-    claim = replace(
-        _claim(scope),
-        evidence=(first, second),
-        review_receipts=receipts,
-        evidence_revision=revision,
-    )
+    edges = (_edge("memory-1"), _edge("memory-2"))
+    claim = replace(_claim(scope), evidence=edges, evidence_revision=evidence_digest(edges))
 
     assert claim.independent_support_count == 2
-    assert claim.review_date_count == 2
+    # 同一个桶写两条 edge 不能凑数
+    dup = (_edge("memory-1"), replace(_edge("memory-1"), basis="observed_pattern"))
+    assert replace(claim, evidence=dup, evidence_revision=evidence_digest(dup)).independent_support_count == 1
 
 
-def _link(target: str, *, relation_type: str = "same_event", status: str = "active") -> dict:
-    """按 relation_store 的真实字段名造一条关系，不是按 You 曾经猜的那套。"""
-    return {"target_bucket_id": target, "type": relation_type, "status": status}
+def test_confirmations_are_counted_per_distinct_calendar_day():
+    """闸一的计数：同一天重申多次只算一天。"""
+    scope = Scope.new()
+    edges = (_edge("memory-1"), _edge("memory-2"))
+    revision = evidence_digest(edges)
+    receipts = (
+        ReviewReceipt("2026-08-17T10:00:00+00:00", scope.observer_role_id, revision, "reaffirmed"),
+        ReviewReceipt("2026-08-17T20:00:00+00:00", scope.observer_role_id, revision, "reaffirmed"),
+        ReviewReceipt("2026-08-18T09:00:00+00:00", scope.observer_role_id, revision, "reaffirmed"),
+    )
+    claim = replace(
+        _claim(scope), evidence=edges, review_receipts=receipts, evidence_revision=revision
+    )
+
+    assert claim.review_date_count == 2, "8-17 那两次只能算一天"
 
 
-def _group(bucket_id: str, relation_links, *, source_id: str = "", grow_batch_id: str = "") -> str:
-    metadata: dict = {}
-    if relation_links is not None:
-        metadata["relation_links"] = relation_links
-    if grow_batch_id:
-        metadata["grow_batch_id"] = grow_batch_id
-    return YouService._evidence_group(bucket_id, metadata, source_id)
+def test_confirmations_are_void_once_the_evidence_set_changes():
+    """证据一换，先前攒的重申全部作废——改一条 you 因此天然也要重新攒三天。"""
+    scope = Scope.new()
+    edges = (_edge("memory-1"), _edge("memory-2"))
+    old_revision = evidence_digest(edges)
+    receipts = tuple(
+        ReviewReceipt(f"2026-08-1{day}T10:00:00+00:00", scope.observer_role_id, old_revision, "reaffirmed")
+        for day in (5, 6, 7)
+    )
+    claim = replace(
+        _claim(scope), evidence=edges, review_receipts=receipts, evidence_revision=old_revision
+    )
+    assert claim.review_date_count == 3
+
+    grown = (*edges, _edge("memory-3"))
+    moved = replace(claim, evidence=grown, evidence_revision=evidence_digest(grown))
+    assert moved.review_date_count == 0
 
 
-def test_same_event_relation_merges_buckets_into_one_evidence_group():
-    """同一件事拆成两条记忆，必须落进同一个证据组。
+def test_legacy_review_result_still_loads():
+    """存量收据用的是旧名字 remains_plausible，升级后不能读不出来。"""
+    scope = Scope.new()
+    edges = (_edge("memory-1"),)
+    revision = evidence_digest(edges)
+    receipt = ReviewReceipt("2026-08-17T10:00:00+00:00", scope.observer_role_id, revision, "remains_plausible")
+    claim = replace(
+        _claim(scope), evidence=edges, review_receipts=(receipt,), evidence_revision=revision
+    )
 
-    否则 independent_support_count 会把一件事算成两份「独立支持」，
-    让 >= 2 的升级门槛被同一件事单独顶满——分数虚高，认识以不该有的
-    速度升级。这条用例锁死的就是这个。
-    """
-    assert _group("memory-1", [_link("memory-2")]) == _group("memory-2", [_link("memory-1")])
+    assert claim.review_date_count == 1
 
-
-def test_detached_relation_does_not_merge_evidence_groups():
-    """被 trace(unlink=...) 解除掉的关系不能再当证据用。
-
-    detached 的关系仍留在 frontmatter 里供追溯，但语义上已经过期。
-    """
-    detached = _group("memory-1", [_link("memory-2", status="detached")])
-    assert detached != _group("memory-1", [_link("memory-2")])
-    assert detached == _group("memory-1", [])
-
-
-def test_evidence_group_only_merges_same_event_relation_types():
-    """related_to 只是「相关」，不代表同一件事，不能合并证据组。"""
-    assert _group("memory-1", [_link("memory-2", relation_type="related_to")]) == _group("memory-1", [])
-    for kind in ("same_event", "continuation_of", "continues"):
-        assert _group("memory-1", [_link("memory-2", relation_type=kind)]) != _group("memory-1", [])
-
-
-def test_unrelated_buckets_stay_in_separate_evidence_groups():
-    assert _group("memory-1", []) != _group("memory-2", [])
-
-
-def test_malformed_relation_links_fall_back_to_single_bucket_group():
-    """frontmatter 里塞了非法关系时退回单桶分组，不能抛异常打断写入。"""
-    assert _group("memory-1", "not-a-list") == _group("memory-1", [])
-    assert _group("memory-1", [{"missing": "fields"}]) == _group("memory-1", [])

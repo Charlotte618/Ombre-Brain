@@ -43,8 +43,17 @@ def validate_you_snapshot_file(path: str | os.PathLike[str]) -> None:
         other_objects = [
             row for row in objects if row["type"] not in {"table", "index"}
         ]
-        required = {"module_state", "claims", "projections", "outbox"}
-        if tables != required or indexes != {"claims_scope_concept"} or other_objects:
+        required = {"module_state", "claims", "projections"}
+        # outbox 是自动派生时代的遗留表：那时每次桶变动都要入队等后台处理。
+        # 现在 you 由模型显式写入，没有队列可言，新库不再建这张表。但升级前
+        # 导出的快照里还有它，所以允许存在、不要求存在——两边的备份都得能恢复。
+        legacy = {"outbox"}
+        if (
+            not required.issubset(tables)
+            or not tables.issubset(required | legacy)
+            or indexes != {"claims_scope_concept"}
+            or other_objects
+        ):
             raise YouStoreError("You snapshot schema is not allowed")
 
         state_rows = connection.execute(
@@ -69,15 +78,8 @@ def validate_you_snapshot_file(path: str | os.PathLike[str]) -> None:
             payload = json.loads(row["payload_json"])
             if row["scope_key"] != scope.key or not isinstance(payload, dict):
                 raise YouStoreError("You snapshot projection is invalid")
-        for row in connection.execute(
-            "SELECT action, state_revision, event_key FROM outbox"
-        ):
-            if (
-                row["action"] not in {"create", "update", "delete", "restore", "hard_delete"}
-                or int(row["state_revision"]) < 1
-                or not str(row["event_key"] or "")
-            ):
-                raise YouStoreError("You snapshot outbox is invalid")
+        # 旧快照里的 outbox 内容不再校验：那张表已经没有消费者，里面残留的
+        # 待处理事件在恢复后也不会被执行。
     except YouStoreError:
         raise
     except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -126,16 +128,6 @@ CREATE TABLE IF NOT EXISTS projections (
     revision INTEGER NOT NULL,
     stale INTEGER NOT NULL CHECK (stale IN (0, 1)),
     payload_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outbox (
-    bucket_id TEXT PRIMARY KEY,
-    action TEXT NOT NULL,
-    state_revision INTEGER NOT NULL,
-    event_key TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at REAL NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 """
@@ -431,82 +423,6 @@ class YouStore:
             raise YouStoreError("You projection is invalid") from exc
         return payload if isinstance(payload, dict) else None
 
-    def enqueue(self, *, bucket_id: str, action: str, state_revision: int, event_key: str) -> bool:
-        state = self.get_state()
-        if not state.enabled or state.state_revision != int(state_revision):
-            return False
-        bucket_id = str(bucket_id or "").strip()
-        action = str(action or "").strip().lower()
-        event_key = str(event_key or "").strip()
-        if not bucket_id or action not in {"create", "update", "delete", "restore", "hard_delete"} or not event_key:
-            raise ValueError("invalid You outbox item")
-        now = utc_now()
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute(
-                    "INSERT INTO outbox(bucket_id, action, state_revision, event_key, attempts, next_attempt_at, created_at, updated_at) "
-                    "VALUES(?, ?, ?, ?, 0, 0, ?, ?) ON CONFLICT(bucket_id) DO UPDATE SET "
-                    "action=excluded.action, state_revision=excluded.state_revision, event_key=excluded.event_key, "
-                    "attempts=0, next_attempt_at=0, updated_at=excluded.updated_at",
-                    (bucket_id, action, int(state_revision), event_key, now, now),
-                )
-                return True
-            finally:
-                connection.close()
-
-    def pending_outbox(self, *, now_epoch: float, limit: int = 20) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        with self._lock:
-            connection = self._connect()
-            try:
-                rows = connection.execute(
-                    "SELECT bucket_id, action, state_revision, event_key, attempts, next_attempt_at "
-                    "FROM outbox WHERE next_attempt_at<=? ORDER BY updated_at, bucket_id LIMIT ?",
-                    (float(now_epoch), max(1, min(100, int(limit)))),
-                ).fetchall()
-            finally:
-                connection.close()
-        return [dict(row) for row in rows]
-
-    def complete_outbox(self, bucket_id: str, event_key: str) -> None:
-        if not self.path.exists():
-            return
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute(
-                    "DELETE FROM outbox WHERE bucket_id=? AND event_key=?",
-                    (str(bucket_id), str(event_key)),
-                )
-            finally:
-                connection.close()
-
-    def retry_outbox(self, bucket_id: str, event_key: str, *, next_attempt_at: float) -> None:
-        if not self.path.exists():
-            return
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute(
-                    "UPDATE outbox SET attempts=attempts+1, next_attempt_at=?, updated_at=? "
-                    "WHERE bucket_id=? AND event_key=?",
-                    (float(next_attempt_at), utc_now(), str(bucket_id), str(event_key)),
-                )
-            finally:
-                connection.close()
-
-    def clear_outbox(self) -> None:
-        if not self.path.exists():
-            return
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute("DELETE FROM outbox")
-            finally:
-                connection.close()
-
     def snapshot_to(self, target: str | os.PathLike[str]) -> bool:
         if not self.path.exists():
             return False
@@ -535,7 +451,7 @@ class YouStore:
                     check = connection.execute("PRAGMA quick_check").fetchone()
                     counts = {
                         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-                        for table in ("claims", "projections", "outbox")
+                        for table in ("claims", "projections")
                     }
                 finally:
                     connection.close()

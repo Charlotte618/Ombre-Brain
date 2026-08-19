@@ -244,7 +244,8 @@ you_service = YouService(
     source_store=source_store,
     logger=logger,
 )
-bucket_mgr.attach_bucket_change_observer(you_service.observe_bucket_change)
+# You 不再订阅桶变动：认识由模型显式写入，没有后台抽取，也就没有可观察的事件。
+# bucket_mgr 的 observer 机制本身留着，它是通用的。
 
 # --- GitHub Sync / GitHub 同步 ---
 from github_sync import GitHubSync  # type: ignore
