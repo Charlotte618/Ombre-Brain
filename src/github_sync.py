@@ -107,44 +107,24 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
         return content
 
 
-class _OverlayBackupFiles(Mapping[str, bytes]):
-    """Layer bounded snapshot paths over the historical collector result."""
+def _vetted_extra_backup_path(relative: str, full: str) -> str:
+    """校验一条来自 vault 之外的额外备份路径，返回规范化后的相对名。
 
-    def __init__(
-        self,
-        base: Mapping[str, bytes],
-        extra_paths: Mapping[str, str],
-    ) -> None:
-        paths: dict[str, str] = {}
-        for relative, full in extra_paths.items():
-            normalized = str(relative).replace("\\", "/")
-            if normalized != _YOU_RELATIVE_PATH:
-                raise RuntimeError(
-                    f"unsupported extra GitHub backup path: {normalized}"
-                )
-            if not os.path.isfile(full) or os.path.islink(full):
-                raise RuntimeError("You snapshot is unavailable or unsafe")
-            if os.path.getsize(full) > _MAX_FILE_BYTES:
-                raise RuntimeError(
-                    f"GitHub backup file exceeds {_MAX_FILE_BYTES} bytes: {normalized}"
-                )
-            paths[normalized] = full
-        self._base = base
-        self._extra = _LazyMarkdownFiles(paths)
+    You 的快照是在临时目录里生成的（要事务一致，不能直接备份活动库），
+    所以它落在 buckets_dir 之外，走不了 _collect_files 那套基于 vault
+    相对路径的检查，只能单独把关。
+    """
 
-    def __len__(self) -> int:
-        return len(set(self._base).union(self._extra))
-
-    def __iter__(self) -> Iterator[str]:
-        yield from self._base
-        for relative in self._extra:
-            if relative not in self._base:
-                yield relative
-
-    def __getitem__(self, relative_path: str) -> bytes:
-        if relative_path in self._extra:
-            return self._extra[relative_path]
-        return self._base[relative_path]
+    normalized = str(relative).replace("\\", "/")
+    if normalized != _YOU_RELATIVE_PATH:
+        raise RuntimeError(f"unsupported extra GitHub backup path: {normalized}")
+    if not os.path.isfile(full) or os.path.islink(full):
+        raise RuntimeError("You snapshot is unavailable or unsafe")
+    if os.path.getsize(full) > _MAX_FILE_BYTES:
+        raise RuntimeError(
+            f"GitHub backup file exceeds {_MAX_FILE_BYTES} bytes: {normalized}"
+        )
+    return normalized
 
 
 def _is_source_relative_path(relative_path: str) -> bool:
@@ -270,9 +250,7 @@ class GitHubSync:
                     if YouStore(buckets_dir).snapshot_to(snapshot_path):
                         validate_you_snapshot_file(snapshot_path)
                         extra_paths[_YOU_RELATIVE_PATH] = snapshot_path
-                    files = self._collect_files(buckets_dir)
-                    if extra_paths:
-                        files = _OverlayBackupFiles(files, extra_paths)
+                    files = self._collect_files(buckets_dir, extra_paths)
                     if not files:
                         self.last_status = "ok"
                         self.last_error = ""
@@ -672,9 +650,25 @@ class GitHubSync:
     # 内部实现
     # --------------------------------------------------------
 
-    def _collect_files(self, buckets_dir: str) -> Mapping[str, bytes]:
-        """Index eligible memory/evidence paths without retaining their bodies."""
+    def _collect_files(
+        self,
+        buckets_dir: str,
+        extra_paths: Mapping[str, str] | None = None,
+    ) -> Mapping[str, bytes]:
+        """Index eligible memory/evidence paths without retaining their bodies.
+
+        extra_paths 是 vault 之外的、已单独把过关的路径（目前只有 You 的事务
+        快照）。它们直接并进同一份索引，而不是再套一层 Mapping：叠加层的
+        __len__ 每次都要把两边的键拼成 set 再 union，而 `if not files` 这类
+        判断会踩到它。一份字典就够了。
+        """
         paths: dict[str, str] = {}
+        for relative, full in (extra_paths or {}).items():
+            paths[_vetted_extra_backup_path(relative, full)] = full
+        # 事务快照必须盖过 vault 里可能存在的同名活动文件。当前
+        # _iter_backup_paths 只产 .md 和 .source，撞不上；这道防线是留给
+        # 以后放宽白名单的人的——备份到写了一半的活动库是静默的坏。
+        extra_relatives = frozenset(paths)
         if not os.path.isdir(buckets_dir):
             return _LazyMarkdownFiles(paths)
         base_real = os.path.realpath(buckets_dir)
@@ -704,6 +698,8 @@ class GitHubSync:
                         f"GitHub backup path exceeds {_MAX_BACKUP_PATH_BYTES} bytes: "
                         f"{relative[:200]}"
                     )
+                if relative in extra_relatives:
+                    continue
                 if relative not in paths and len(paths) >= _MAX_BACKUP_FILES:
                     raise RuntimeError(
                         f"GitHub backup has more than {_MAX_BACKUP_FILES} files; "

@@ -83,10 +83,14 @@ class Scope:
 
     @property
     def key(self) -> str:
-        payload = "\x1f".join(
+        # 三个 id 直接拼。这是身份不是内容，没有「变了要检测」的需求，原来
+        # sha256 一遍只是把它变得不可读：出问题时从库里捞出一串 64 位十六进制，
+        # 看不出属于哪个 owner/role/user，还得反查。id 本身就在
+        # module_state.scope_json 里明文存着，拼接不多暴露任何东西。
+        # _ID_RE 限定了 `前缀_32位hex`，字符集里没有分隔符，拼不出歧义。
+        return "|".join(
             (self.owner_instance_id, self.observer_role_id, self.subject_user_id)
         )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, str]:
         return {

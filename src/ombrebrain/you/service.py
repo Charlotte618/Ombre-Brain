@@ -10,6 +10,7 @@ import re
 import time
 from typing import Any, Mapping
 
+from ombrebrain.storage.relation_store import normalize_relation_links
 from ombrebrain.storage.source_store import source_links_from_metadata
 from utils import count_tokens_approx, parse_bool
 
@@ -628,22 +629,31 @@ class YouService:
             material = "grow:" + str(metadata["grow_batch_id"]).strip()
         else:
             same_event_ids: list[str] = []
-            relations = metadata.get("relations") or []
-            if isinstance(relations, list):
-                for relation in relations:
-                    if not isinstance(relation, Mapping):
-                        continue
-                    if str(relation.get("type") or "").strip().lower() not in {
-                        "same_event",
-                        "continuation_of",
-                        "continues",
-                    }:
-                        continue
-                    related = str(
-                        relation.get("bucket_id") or relation.get("target") or ""
-                    ).strip()
-                    if related:
-                        same_event_ids.append(related)
+            # 关系一律走 relation_store 的规范化函数，不自己解析 frontmatter。
+            # 手写解析读的是 metadata["relations"]，可 bucket_manager 写进去的
+            # 键叫 relation_links、目标字段叫 target_bucket_id——三个名字没一个
+            # 对得上，于是这段聚合从来没生效过，还不报错：每个桶各自成组，
+            # 同一件事拆成几条记忆就被算成几份「独立支持」，把
+            # independent_support_count 的门槛虚假地顶满。字段名归上游管，
+            # 这里跟着走，以后格式再变也不会静默退化。
+            try:
+                links = normalize_relation_links(metadata.get("relation_links"))
+            except (ValueError, TypeError):
+                links = []
+            for link in links:
+                # detached 是被 trace(unlink=...) 解除掉的关系。它仍留在
+                # frontmatter 里供追溯，但不能再当成有效证据来聚合。
+                if link.get("status") != "active":
+                    continue
+                if link.get("type") not in {
+                    "same_event",
+                    "continuation_of",
+                    "continues",
+                }:
+                    continue
+                related = str(link.get("target_bucket_id") or "").strip()
+                if related:
+                    same_event_ids.append(related)
             material = "event:" + "\x1f".join(sorted({bucket_id, *same_event_ids}))
         return "eg_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 

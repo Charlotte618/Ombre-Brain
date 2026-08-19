@@ -11,6 +11,10 @@
 - You 在独立作用域 SQLite 中维护派生主张、审查收据、投影和 outbox；默认关闭且不开库，关闭后停止新观察但保留可恢复状态，重新开启不回填关闭期间的数据。
 - `You` 只返回经过原文相似性守卫的短语义部件，调用模型必须自行组织语言；任何原文、完整句子、内部证据、置信度或审查记录都不通过 MCP 出口。
 - 本地 ZIP 与 GitHub 备份支持事务一致的 You 快照，恢复时校验 schema、作用域、完整性及 bucket ID 绑定，并按恢复后的开关状态重新同步工具暴露。
+- 证据分组按 `relation_store` 的规范化结果读 `relation_links`：只有 `status=active`
+  且类型为 `same_event` / `continuation_of` / `continues` 的关系才会把多个桶并进
+  同一个证据组。同一件事拆成几条记忆只算一份独立支持，`independent_support_count`
+  的升级门槛不会被同一件事顶满；被 `trace(unlink=...)` 解除的关系立即失效。
 
 ## 3.4.1
 

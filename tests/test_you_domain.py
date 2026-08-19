@@ -14,6 +14,7 @@ from ombrebrain.you import (
     leaks_protected_text,
 )
 from ombrebrain.you.models import evidence_digest, utc_now
+from ombrebrain.you.service import YouService
 
 
 def _edge(bucket_id: str = "memory-1") -> EvidenceEdge:
@@ -205,3 +206,54 @@ def test_claim_state_derives_independent_evidence_and_review_dates():
 
     assert claim.independent_support_count == 2
     assert claim.review_date_count == 2
+
+
+def _link(target: str, *, relation_type: str = "same_event", status: str = "active") -> dict:
+    """按 relation_store 的真实字段名造一条关系，不是按 You 曾经猜的那套。"""
+    return {"target_bucket_id": target, "type": relation_type, "status": status}
+
+
+def _group(bucket_id: str, relation_links, *, source_id: str = "", grow_batch_id: str = "") -> str:
+    metadata: dict = {}
+    if relation_links is not None:
+        metadata["relation_links"] = relation_links
+    if grow_batch_id:
+        metadata["grow_batch_id"] = grow_batch_id
+    return YouService._evidence_group(bucket_id, metadata, source_id)
+
+
+def test_same_event_relation_merges_buckets_into_one_evidence_group():
+    """同一件事拆成两条记忆，必须落进同一个证据组。
+
+    否则 independent_support_count 会把一件事算成两份「独立支持」，
+    让 >= 2 的升级门槛被同一件事单独顶满——分数虚高，认识以不该有的
+    速度升级。这条用例锁死的就是这个。
+    """
+    assert _group("memory-1", [_link("memory-2")]) == _group("memory-2", [_link("memory-1")])
+
+
+def test_detached_relation_does_not_merge_evidence_groups():
+    """被 trace(unlink=...) 解除掉的关系不能再当证据用。
+
+    detached 的关系仍留在 frontmatter 里供追溯，但语义上已经过期。
+    """
+    detached = _group("memory-1", [_link("memory-2", status="detached")])
+    assert detached != _group("memory-1", [_link("memory-2")])
+    assert detached == _group("memory-1", [])
+
+
+def test_evidence_group_only_merges_same_event_relation_types():
+    """related_to 只是「相关」，不代表同一件事，不能合并证据组。"""
+    assert _group("memory-1", [_link("memory-2", relation_type="related_to")]) == _group("memory-1", [])
+    for kind in ("same_event", "continuation_of", "continues"):
+        assert _group("memory-1", [_link("memory-2", relation_type=kind)]) != _group("memory-1", [])
+
+
+def test_unrelated_buckets_stay_in_separate_evidence_groups():
+    assert _group("memory-1", []) != _group("memory-2", [])
+
+
+def test_malformed_relation_links_fall_back_to_single_bucket_group():
+    """frontmatter 里塞了非法关系时退回单桶分组，不能抛异常打断写入。"""
+    assert _group("memory-1", "not-a-list") == _group("memory-1", [])
+    assert _group("memory-1", [{"missing": "fields"}]) == _group("memory-1", [])

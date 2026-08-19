@@ -152,6 +152,15 @@ class YouStore:
         self.root = Path(buckets_dir).resolve() / ".you"
         self.path = self.root / "you.sqlite3"
         self._lock = threading.RLock()
+        # (stat 戳记, 状态)。get_state 在每次桶变化时都被调用一次，原来每次都
+        # 开一条 SQLite 连接、查一行、再关掉——模块默认关闭时这笔开销照付，
+        # 纯属白给。改成先 stat 比戳记：没变就直接用缓存。
+        self._state_cache: tuple[tuple[int, int], ModuleState] | None = None
+
+    def invalidate_state_cache(self) -> None:
+        """丢掉状态缓存。备份恢复整库替换后必须调一次。"""
+        with self._lock:
+            self._state_cache = None
 
     @property
     def exists(self) -> bool:
@@ -175,8 +184,16 @@ class YouStore:
             raise YouStoreError("You state is unavailable") from exc
 
     def get_state(self) -> ModuleState:
-        if not self.path.exists():
+        try:
+            stat = self.path.stat()
+        except OSError:
+            # 库还没建（默认关闭的常态）：一次 stat 就够，不碰 SQLite。
+            self._state_cache = None
             return ModuleState.disabled()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        cached = self._state_cache
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
         with self._lock:
             try:
                 connection = self._connect()
@@ -188,18 +205,33 @@ class YouStore:
                 finally:
                     connection.close()
                 if row is None:
-                    return ModuleState.disabled()
-                scope_raw = json.loads(row["scope_json"])
-                if not isinstance(scope_raw, dict):
-                    raise ValueError("invalid scope")
-                return ModuleState(
-                    enabled=bool(row["enabled"]),
-                    scope=Scope.from_dict(scope_raw),
-                    state_revision=row["state_revision"],
-                    changed_at=row["changed_at"],
-                    changed_by=row["changed_by"],
-                )
+                    state = ModuleState.disabled()
+                else:
+                    scope_raw = json.loads(row["scope_json"])
+                    if not isinstance(scope_raw, dict):
+                        raise ValueError("invalid scope")
+                    state = ModuleState(
+                        enabled=bool(row["enabled"]),
+                        scope=Scope.from_dict(scope_raw),
+                        state_revision=row["state_revision"],
+                        changed_at=row["changed_at"],
+                        changed_by=row["changed_by"],
+                    )
+                # 戳记在读库之后重新取：读的过程中若有别的写入落盘，这里拿到的
+                # 新戳记会和刚读到的内容对不上，宁可下次再读一遍，也不缓存一个
+                # 可能已经过期的状态。
+                try:
+                    fresh = self.path.stat()
+                except OSError:
+                    self._state_cache = None
+                else:
+                    if (fresh.st_mtime_ns, fresh.st_size) == stamp:
+                        self._state_cache = (stamp, state)
+                    else:
+                        self._state_cache = None
+                return state
             except (sqlite3.Error, ValueError, TypeError, json.JSONDecodeError) as exc:
+                self._state_cache = None
                 raise YouStoreError("You state is unavailable") from exc
 
     def set_enabled(
@@ -244,6 +276,9 @@ class YouStore:
                     ),
                 )
                 connection.execute("COMMIT")
+                # 写盘会改 mtime，戳记本来就会自动失效；这里再显式清一次，
+                # 免得依赖文件系统时间戳的精度。
+                self._state_cache = None
                 return ModuleState(bool(enabled), scope, revision, changed_at, changed_by)
             except Exception:
                 try:
