@@ -133,6 +133,9 @@ EXPECTED_TOOL_PROPERTIES = {
         "unlink",
         "relink",
         "relation_type",
+        # 3.4.0：订正/删除写入那一刻留下的引语。只有 replace，没有 append——
+        # 补录不归 trace，同上一条是一个道理。
+        "quotes_replace",
     },
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},

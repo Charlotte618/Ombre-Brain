@@ -432,6 +432,11 @@ if text_match or semantic_match: 入选
   - `relink="目标id", relation_type="related_to"`：改已存在关系的类型，对侧自动写入 `reverse_relation_type`（A `continuation_of` B ⇒ B `continues` A）。改过的关系**降级为手动关系**（去掉 `auto` / `score`），此后受 `merge_auto_links` 保护，不再被自动推断按相似度挤掉。
   - **`relink` 不能凭空建立关系**：两侧都没有这条关系时明确拒绝。这是它与 3.0.0 删掉的 `relation_attach` 之间唯一的区别——「建立」仍然只归后端，理由见 `tools/_relation_link.py` 开头。
   - 不支持 `custom`：custom 关系必须带 label，而 trace 没有传 label 的入口。单向残留（一侧有、另一侧没有）两种操作都能处理。
+- `quotes_replace` 订正/删除写入那一刻留下的引语（3.4.0，实现见 `tools/trace/_quote_edit.py`）。与其他字段更新、以及 `unlink`/`relink` 都互斥，走独立早返回分支；冲突时显式报错而不是静默丢掉另外半个意图。
+  - 整体替换语义：传 `[]` 删除全部（连 frontmatter 字段一起 pop，不留空列表）；只删其中一句就把要保留的原样传回来。格式同 `hold(quotes=...)`。
+  - **只能改和删，不能补录**：桶里本来没有引语时拒绝，条数只能持平或减少。引语与已删除的原文层的全部区别就在「谁决定记住」——原文层系统自动存全量、事后随时可查，引语是写入那一刻挑的（见 `ombrebrain/storage/quote_store.py` 模块 docstring）。能补录的话，任何一句话都可以被事后追认为「当时就知道重要」，这个通道当场退化成存原文。与 `relink 不能凭空建立关系` 同源。
+  - 条数/长度硬上限（3 条 / 每条 100 字，**超限拒绝不截断**）由 `BucketManager._sanitize_quotes` → `normalize_quotes` 统一把关，`_quote_edit` 不重复校验。
+  - 成功后回显的是**读回磁盘的结果**而不是入参：入参可能是裸字符串列表，落盘的是归一化并清洗过的结构；回显入参会让「改成了什么」看不出来。
 
 (返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 

@@ -708,7 +708,7 @@ async def breath_search(
     date_to: Optional[str] = "",
     quotes: Optional[bool] = False,
 ) -> str:
-    """按关键词/语义检索记忆桶,融合关键词/BM25+语义检索,向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写。domain 逗号分隔,按主题域预筛。date_from/date_to 按桶的创建时间过滤，支持 YYYY-MM-DD 或 ISO 8601，同日上下界包含当天全日。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。需要 tags/importance_min/valence/arousal/max_tokens/catalog 等更多过滤维度用 breath_advanced(...)。quotes=True：如果你发现自己不只想知道当时发生了什么，还想知道当时到底是怎么说的，就要它——命中的桶里如果存过原话，会原样附在正文后面。默认不给，引语平时安静躺着，不占上下文也不打扰你。"""
+    """按关键词/语义检索记忆桶,融合关键词/BM25+语义检索,向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写。domain 逗号分隔,按主题域预筛。date_from/date_to 按桶的创建时间过滤，支持 YYYY-MM-DD 或 ISO 8601，同日上下界包含当天全日。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。需要 tags/importance_min/valence/arousal/max_tokens/catalog 等更多过滤维度用 breath_advanced(...)。quotes=True：如果你发现自己不只想知道当时发生了什么，还想知道当时到底是怎么说的，就要它——命中的桶里如果存过原话，会原样附在正文后面。默认不给，引语平时安静躺着，不占上下文也不打扰你。它给的是写入那一刻挑出来的那几句（每条记忆最多 3 句、每句 100 字），**不是原文**：OB 没有「返回全文」这个入口，没挑出来的话当时就没有留下。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, domain=domain, max_results=max_results,
@@ -774,7 +774,7 @@ async def hold(
     source_ranges: Optional[list] = None,
     quotes: Optional[list] = None,
 ) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。domain 可选、逗号分隔；显式传入时优先于打标模型结果。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆且 domain 固定为 feel。source_bucket 是正在消化的原始记忆桶 ID。source_content/source_ranges 是可选原文证据：由调用方自行决定是否提供；原文进入与 grow 共用的不可变原文层，不参与普通 breath。省略 source_ranges 时整份 source_content 默认属于当前 hold 事件；显式 ranges 使用 1-based 闭区间。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。quotes 是这一刻我决定要原样记住的那一两句话——不是记录对话，是说出口的当下就知道自己不想忘的那几句。传字符串列表，或 [{"text":"原话","speaker":"谁说的","at":"什么时候"}]。最多 3 句、每句 100 字；超了会被拒绝而不是截断，因为截断过的话已经不是原话。它平时不出现在任何浮现里，只有以后我自己想知道当时到底怎么说的时候才拿得出来。"""
+    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。domain 可选、逗号分隔；显式传入时优先于打标模型结果。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆且 domain 固定为 feel。source_bucket 是正在消化的原始记忆桶 ID。source_content/source_ranges 是可选原文证据：由调用方自行决定是否提供；原文进入与 grow 共用的不可变原文层，不参与普通 breath。省略 source_ranges 时整份 source_content 默认属于当前 hold 事件；显式 ranges 使用 1-based 闭区间。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。quotes 是这一刻我决定要原样记住的那一两句话——不是记录对话，是说出口的当下就知道自己不想忘的那几句。传字符串列表，或 [{"text":"原话","speaker":"谁说的","at":"什么时候"}]。最多 3 句、每句 100 字；超了会被拒绝而不是截断，因为截断过的话已经不是原话。**默认状态是一句都不放**：3 句是上限不是配额，绝大多数记忆不需要引语，拿不准就别放。不要为了保住上下文把一段话切成几句塞进来，也不要挑「有信息量」的句子——那是在用引语存原文，而原文层正是因为这个原因被删掉的。只放那种漏掉会真的可惜的原话。它平时不出现在任何浮现里，只有以后我自己想知道当时到底怎么说的时候才拿得出来。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, title=title, tags=tags, importance=importance,
@@ -806,7 +806,7 @@ async def grow(
 ) -> str:
     """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
 
-    进阶(可选):若你已经把长文拆成 N 条最终正文，可传字符串 items，或对象 items=[{"title":"最终标题","content":"最终正文","tags":["中文短标签"],"importance":5,"domain":["恋爱"],"valence":0.8,"arousal":0.4,"why_remembered":"我为什么要留下这条","source_ranges":[[1,20]],"quotes":["当时说出口就知道要记住的那句原话"]}]。quotes 只在 items 这条路上有；content 整段交给系统拆分时不填，因为那些条目是拆出来的，不是我一条条挑的。显式字段优先于自动打标，正文逐字入库，合并时也不压缩。人工 why_remembered 与 digest/短内容打标生成的合法理由都会在首次新建时保存；后续合并仅补旧空值，绝不覆盖人工或历史理由。模型漏字段或返回非法理由时仍正常保存正文。同时传 content 时，content 是整批共享的隐藏原文证据，只保存一次；source_ranges 使用 1-based 闭区间把每个桶连回自己的原文片段。"""
+    进阶(可选):若你已经把长文拆成 N 条最终正文，可传字符串 items，或对象 items=[{"title":"最终标题","content":"最终正文","tags":["中文短标签"],"importance":5,"domain":["恋爱"],"valence":0.8,"arousal":0.4,"why_remembered":"我为什么要留下这条","source_ranges":[[1,20]],"quotes":["当时说出口就知道要记住的那句原话"]}]。quotes 只在 items 这条路上有；content 整段交给系统拆分时不填，因为那些条目是拆出来的，不是我一条条挑的。每条最多 3 句、每句 100 字，超限拒绝不截断；**多数 item 不该有 quotes**——整理长文时尤其容易顺手把原文抄进去，那是在用引语存全文，不是在挑那句不想忘的话。显式字段优先于自动打标，正文逐字入库，合并时也不压缩。人工 why_remembered 与 digest/短内容打标生成的合法理由都会在首次新建时保存；后续合并仅补旧空值，绝不覆盖人工或历史理由。模型漏字段或返回非法理由时仍正常保存正文。同时传 content 时，content 是整批共享的隐藏原文证据，只保存一次；source_ranges 使用 1-based 闭区间把每个桶连回自己的原文片段。"""
     return await _with_notice(
         _t_grow.dispatch(content, items=items, test_data=test_data),
         op="grow",
@@ -851,6 +851,7 @@ async def trace(
     unlink: Optional[str] = "",
     relink: Optional[str] = "",
     relation_type: Optional[str] = "",
+    quotes_replace: Optional[list] = None,
 ) -> str:
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
@@ -879,6 +880,13 @@ async def trace(
     取反向类型。改过的关系会被标记为手动关系，此后不再被自动推断改写或挤掉。
     relink 不能凭空建立关系——两条记忆之间没有已存在的关系时会被拒绝。
     这两个参数与其他字段更新互斥，请单独调用。
+
+    引语订正：quotes_replace 整体替换这条记忆的引语，用来订正和删除写入那一刻
+    留下的原话。传 [] 删掉全部；只想去掉其中一句，就把要保留的那几句原样传回来。
+    格式同 hold(quotes=...)：字符串列表，或 [{"text":"原话","speaker":"谁说的",
+    "at":"什么时候"}]。**只能改和删，不能补录**——这条记忆本来没有引语会被拒绝，
+    条数也只能持平或减少。「当时说出口就知道不想忘」是写入那一刻的判断；事后
+    追认一句话「当时就知道它重要」，那不是引语，是摘要。同样与其他字段更新互斥。
     """
     if deletion_request_id or deletion_decision:
         result = await deletion_requests.decide(
@@ -904,6 +912,7 @@ async def trace(
             restore=restore,
             old_str=old_str, new_str=new_str,
             unlink=unlink, relink=relink, relation_type=relation_type,
+            quotes_replace=quotes_replace,
         ),
         op="trace",
         args={
@@ -924,6 +933,9 @@ async def trace(
             "media_append_count": len(media_append or []),
             "media_replace_count": len(media_replace or []),
             "unlink": unlink, "relink": relink, "relation_type": relation_type,
+            "quotes_replace_count": (
+                len(quotes_replace) if quotes_replace is not None else -1
+            ),
         },
     )
 
