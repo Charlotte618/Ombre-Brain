@@ -18,10 +18,13 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
 - resolved/digested 切换会附中文语义提示
 - unlink/relink 修正后端自动建错的桶间关系，双向生效，走独立早返回
   分支（见 _relation_edit.py），不与字段更新混用
+- quotes_replace 订正/删除写入那一刻留下的引语，同样走独立早返回分支
+  （见 _quote_edit.py）；只能改和删，不能补录
 
 不做什么（边界）：
 - 不创建桶（那是 hold/grow/plan/letter 的事）
 - 不凭空建立桶间关系——relink 只改已存在关系的类型，「建立」仍归后端
+- 不补录引语——quotes_replace 只改/删已有的，「决定记住哪几句」仍归写入那一刻
 - 不把普通记忆转换成可擦除测试数据，也不物理删除普通记忆
 - 不返回结构化数据，统一中文短句
 
@@ -30,7 +33,7 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
                      hard_delete, delete_reason, restore, old_str, new_str,
-                     unlink, relink, relation_type) → str
+                     unlink, relink, relation_type, quotes_replace) → str
 ========================================
 """
 
@@ -49,7 +52,7 @@ from .._common import (
     check_protected_quota,
 )
 from ..plan.core import is_letter_bucket, letter_lock_revision, letter_lock_state
-from . import _relation_edit
+from . import _quote_edit, _relation_edit
 
 
 async def trace_core(
@@ -82,6 +85,7 @@ async def trace_core(
     unlink: Optional[str] = "",
     relink: Optional[str] = "",
     relation_type: Optional[str] = "",
+    quotes_replace: Optional[list] = None,
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -208,11 +212,36 @@ async def trace_core(
     relink = str(relink or "").strip()
     relation_type = str(relation_type or "").strip()
     if unlink or relink or relation_type:
+        if quotes_replace is not None:
+            return "quotes_replace 不能与关系修正同时使用，请分开调用；本次未修改。"
         if not await rt.bucket_mgr.get(bucket_id):
             return f"找不到记忆 {bucket_id}；本次未修改。"
         return await _relation_edit.apply(
             bucket_id.strip(), unlink, relink, relation_type
         )
+
+    # 引语订正同样是独立早返回分支，理由与关系修正一致：它只动 metadata.quotes，
+    # 是「回头看这几句，说其中某句不对」，和改 importance、改正文不是一次动作。
+    #
+    # 冲突必须显式报错而不是静默忽略：早返回分支最容易出的错，就是同一次调用里
+    # 另外那半个意图被悄悄丢掉，而返回值看起来是成功的。
+    if quotes_replace is not None:
+        if not isinstance(quotes_replace, list):
+            return "quotes_replace 必须是列表（空列表表示删除全部引语）；本次未修改。"
+        if any((
+            bool(name), bool(domain), valence != -1, arousal != -1,
+            importance != -1, bool(tags), resolved != -1, pinned != -1,
+            protected != -1, digested != -1, bool(content), delete, hard_delete,
+            restore, bool(status), weight != -1, dont_surface != -1,
+            bool(why_remembered), bool(meaning_append), meaning_replace is not None,
+            bool(media_append), media_replace is not None, bool(delete_reason),
+            bool(old_str), new_str_provided,
+        )):
+            return (
+                "quotes_replace 必须单独调用，不能与其他字段更新或删除混在一次 "
+                "trace 里；本次未修改。"
+            )
+        return await _quote_edit.apply(bucket_id.strip(), quotes_replace)
 
     if restore or delete or hard_delete:
         guarded_reader = (

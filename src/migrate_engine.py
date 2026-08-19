@@ -196,6 +196,30 @@ def _safe_unlink(path: str) -> None:
         logger.warning(f"[migrate] failed to clean up staged file {path}: {e}")
 
 
+def _is_same_file(left: str, right: str) -> bool:
+    """判断两个路径是不是同一个文件，兼容大小写不敏感的文件系统。
+
+    只做字符串比较在 macOS / Windows 上会漏判：桶渲染出的 `Memory_x.md` 与
+    磁盘上已有的 `memory_x.md` 落在同一个 inode 上，但 `os.path.normcase`
+    在 POSIX 上是恒等函数、不折叠大小写，于是覆盖导入会判成「不是同一个文件，
+    可目标又已存在」而直接抛 FileExistsError——旧记忆没归档、新内容没写进去，
+    功能在这两个平台上整个不可用（Linux 因为大小写敏感反而绕开了）。
+
+    先比字符串是为了覆盖目标尚不存在的正常新建路径（此时 samefile 必然抛错）；
+    比不上再用 samefile 比 st_dev/st_ino，这才是「是不是同一个文件」的真答案。
+    """
+
+    if os.path.normcase(os.path.abspath(left)) == os.path.normcase(
+        os.path.abspath(right)
+    ):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        # 任一路径不存在或不可 stat：那就不是同一个文件。
+        return False
+
+
 @asynccontextmanager
 async def _noop_bucket_turn():
     yield
@@ -1439,21 +1463,11 @@ class MigrateEngine:
         )
         historical_path = ""
         target_created = False
-        same_target = (
-            os.path.normcase(os.path.abspath(existing_path))
-            == os.path.normcase(os.path.abspath(target_path))
-        )
-        if not same_target:
-            # macOS commonly uses a case-insensitive filesystem.  An imported
-            # ``Memory_...`` filename can therefore resolve to the existing
-            # ``memory_...`` inode even though the path strings differ.
-            try:
-                same_target = os.path.samefile(existing_path, target_path)
-            except (FileNotFoundError, OSError):
-                same_target = False
+        same_target = _is_same_file(existing_path, target_path)
         if same_target:
-            # Keep the existing spelling and location when replacing the
-            # active bucket; only its contents and metadata should change.
+            # 覆盖活动桶时沿用磁盘上现有的文件名拼写与位置，只换内容和元数据。
+            # macOS 实测 os.replace 本来就会保留原拼写，但别的大小写不敏感
+            # 文件系统未必一致——写明比依赖文件系统行为稳。
             target_path = existing_path
         try:
             if not same_target and os.path.exists(target_path):

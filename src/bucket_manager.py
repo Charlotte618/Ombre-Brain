@@ -2475,6 +2475,9 @@ class BucketManager:
         if "quotes_append" in kwargs:
             # 早校验：非法引语在这里就报错，不要等到写文件那一步。
             kwargs["quotes_append"] = self._sanitize_quotes(kwargs["quotes_append"])
+        if "quotes" in kwargs and kwargs["quotes"]:
+            # 整体替换（trace quotes_replace）。空列表是「清空」，不必过校验。
+            kwargs["quotes"] = self._sanitize_quotes(kwargs["quotes"])
 
         try:
             post = frontmatter.load(file_path)
@@ -2658,6 +2661,14 @@ class BucketManager:
                 m for m in kwargs["media_append"] if m.get("path") not in existing_paths
             ]
             post["media"] = appended[:_MEDIA_MAX_ITEMS]
+        if "quotes" in kwargs:
+            # 整体覆盖写入（trace quotes_replace，用于订正与删除）；空列表清空该字段。
+            # 与 quotes_append 的区别是「谁说了算」：append 是合并两段记忆时两边
+            # 的引语都该留下，replace 是我回头看这几句，说其中某句不对或不该留。
+            if kwargs["quotes"]:
+                post["quotes"] = kwargs["quotes"]
+            else:
+                post.metadata.pop("quotes", None)
         if "meaning" in kwargs:
             # Miss: 整体覆盖写入（trace meaning_replace，用于纠错/清理）；空列表清空该字段。
             if kwargs["meaning"]:

@@ -435,6 +435,11 @@ if text_match or semantic_match: 入选
   - `relink="目标id", relation_type="related_to"`：改已存在关系的类型，对侧自动写入 `reverse_relation_type`（A `continuation_of` B ⇒ B `continues` A）。改过的关系**降级为手动关系**（去掉 `auto` / `score`），此后受 `merge_auto_links` 保护，不再被自动推断按相似度挤掉。
   - **`relink` 不能凭空建立关系**：两侧都没有这条关系时明确拒绝。这是它与 3.0.0 删掉的 `relation_attach` 之间唯一的区别——「建立」仍然只归后端，理由见 `tools/_relation_link.py` 开头。
   - 不支持 `custom`：custom 关系必须带 label，而 trace 没有传 label 的入口。单向残留（一侧有、另一侧没有）两种操作都能处理。
+- `quotes_replace` 订正/删除写入那一刻留下的引语（3.4.0，实现见 `tools/trace/_quote_edit.py`）。与其他字段更新、以及 `unlink`/`relink` 都互斥，走独立早返回分支；冲突时显式报错而不是静默丢掉另外半个意图。
+  - 整体替换语义：传 `[]` 删除全部（连 frontmatter 字段一起 pop，不留空列表）；只删其中一句就把要保留的原样传回来。格式同 `hold(quotes=...)`。
+  - **只能改和删，不能补录**：桶里本来没有引语时拒绝，条数只能持平或减少。引语与已删除的原文层的全部区别就在「谁决定记住」——原文层系统自动存全量、事后随时可查，引语是写入那一刻挑的（见 `ombrebrain/storage/quote_store.py` 模块 docstring）。能补录的话，任何一句话都可以被事后追认为「当时就知道重要」，这个通道当场退化成存原文。与 `relink 不能凭空建立关系` 同源。
+  - 条数/长度硬上限（3 条 / 每条 100 字，**超限拒绝不截断**）由 `BucketManager._sanitize_quotes` → `normalize_quotes` 统一把关，`_quote_edit` 不重复校验。
+  - 成功后回显的是**读回磁盘的结果**而不是入参：入参可能是裸字符串列表，落盘的是归一化并清洗过的结构；回显入参会让「改成了什么」看不出来。
 
 (返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 
@@ -619,8 +624,8 @@ MCP `tools/list` / tool search 为准，确保关闭时模型侧也不可见。
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 主连接器：13 个记忆动作 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / **I**；独立开关开启时额外暴露 **You** |
-| `/mcp-extra` | — | 公开 | 第二个 FastMCP 实例：letter_write / letter_lock_update / letter_read。2.8.5 起退役返回 404，3.2.0 恢复。与 `/mcp` 共享同一套中间件（鉴权、体积限制、CSRF）——见 `web/request_limits.py` 的 `_MCP_ENDPOINT_PATHS` |
+| `/mcp/*` | — | 公开 | FastMCP 唯一连接器：16 个工具 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I**；You 独立开关开启时额外暴露 **You**（17 个） |
+| ~~`/mcp-extra`~~ | — | — | 已退役返回 404。2.8.5 退役 → 3.2.0 随信件恢复为第二个 FastMCP 实例 → 3.4.0 随信件并回主链路再次退役。端点集合见 `web/request_limits.py` 的 `_MCP_ENDPOINT_PATHS` |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
 
@@ -920,7 +925,7 @@ Phase 38 后，Dashboard `/api/system/diagnostics` 会追加 `migration_preserva
 
 工程名不能作为 public MCP tool 暴露：`remember`、`touch`、`resolve`、`suppress`、`surface`、`hippocampal_recall`、`offline_consolidate`、`update_memory_row` 等只允许作为 internal label。restricted/admin 工具（如 `verify_ledger`、`replay_ledger`、`rebuild_projection`、`admin_erasure_request`）必须显式标为 restricted 且要求 admin。
 
-这一步的边界是 diagnostic/manifest validation：它保证工具名设计不会滑回 database/API 语言，也不会让 `delete`、`dump_all`、`set_emotion`、`decide`、`update_user_profile`、`force_personality` 这类破坏 OB 哲学边界的名字进入普通工具清单。Dashboard `/api/system/diagnostics` 的 `public_tool_manifest` 检查会解析 `src/server.py` 中的 `@mcp.tool()` / `@mcp_extra.tool()` 装饰器，把公开工具名交给该 contract 校验；它不导入 `server.py`，避免启动副作用。
+这一步的边界是 diagnostic/manifest validation：它保证工具名设计不会滑回 database/API 语言，也不会让 `delete`、`dump_all`、`set_emotion`、`decide`、`update_user_profile`、`force_personality` 这类破坏 OB 哲学边界的名字进入普通工具清单。Dashboard `/api/system/diagnostics` 的 `public_tool_manifest` 检查会解析 `src/server.py` 中的 `@mcp.tool()` 装饰器，把公开工具名交给该 contract 校验；它不导入 `server.py`，避免启动副作用。
 
 ### 4.3.10.7 Code Standards Contract（vNext Phase 17，diagnostic）
 
@@ -1147,7 +1152,7 @@ Phase 42 后，Dashboard `/api/system/diagnostics` 会追加 `vnext_coverage` �
 
 ### 4.3.10.21 Public Tool Manifest Diagnostics（Phase 32）
 
-`web.system.build_system_diagnostics()` 现在会追加 `public_tool_manifest` check。它通过 AST 解析 `src/server.py`，收集 `@mcp.tool()` 和 `@mcp_extra.tool()` 装饰的公开 MCP 工具函数名，然后用 `PublicToolDesignContract.evaluate_manifest()` 校验这些名字仍然符合器官语言边界。
+`web.system.build_system_diagnostics()` 现在会追加 `public_tool_manifest` check。它通过 AST 解析 `src/server.py`，收集 `@mcp.tool()` 装饰的公开 MCP 工具函数名，然后用 `PublicToolDesignContract.evaluate_manifest()` 校验这些名字仍然符合器官语言边界。
 
 这一步刻意不 import `server.py`，因为 server 模块带有 FastMCP 实例和启动副作用；源码审计足以覆盖当前公开注册点。如果后续 FastMCP 注册方式迁移到独立 manifest，可以把这个 diagnostics check 的输入从 AST 换成真实 manifest，但仍应先经过 `PublicToolDesignContract` 再显示或发布。
 
