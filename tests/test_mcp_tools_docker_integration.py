@@ -617,8 +617,12 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     result = mcp_client.call("grow", {"content": content})
 
     if not EXPECT_COMPRESSION_PROVIDER:
+        # 文案跟着 errors.llm_step_failed_error 的分岔走：这条分支代表服务确实
+        # 没配 provider（api_available=False），断言只咬「不可用」这半句和错误码，
+        # 不咬后面那串配置项名，免得产品换个指引措辞就把测试打红。
         assert "OB-E004" in result
-        assert "API key 未配置或调用失败" in result
+        assert "脱水 API 不可用" in result
+        assert "桶未创建" in result
         after_ids = _bucket_ids(mcp_client.call("pulse", {"include_archive": True}))
         assert after_ids == before_ids
         return
