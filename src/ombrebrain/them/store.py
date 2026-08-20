@@ -378,6 +378,23 @@ class ThemStore:
                 connection.close()
 
     def snapshot_to(self, target: str | os.PathLike[str]) -> bool:
+        """导出一份库快照。
+
+        ⚠️ **现在没有调用者。** `.you` 在三个地方被特殊处理——
+        `backup_archive`（本地备份）、`github_sync`（远程同步）、
+        `migrate_engine`（记忆包迁移）——them 一处都还没接上，
+        所以 them 的数据目前不进备份、不进同步、不进迁移包。
+
+        没有顺手接上去，是因为其中一条不是工程问题：them 记的是**第三方**，
+        同步到 GitHub 意味着别人的信息进了远程仓库，这需要项目所有者明确决定，
+        不该由「照着 you 抄一遍」带进去。
+
+        接的时候还要补一个 `validate_them_snapshot_file`（照
+        `validate_you_snapshot_file` 写），否则恢复路径没有结构校验。
+
+        them 默认关闭、尚未上线，眼下没有会丢的存量数据；但这条缺口一旦
+        上线就变成真实的数据丢失，别让它安静地留着。
+        """
         if not self.path.exists():
             return False
         target_path = Path(target)
