@@ -64,6 +64,11 @@ from ombrebrain.storage.source_store import (
     referenced_source_ids_from_metadata,
 )
 from ombrebrain.storage.relation_store import normalize_relation_links
+from ombrebrain.them.store import (
+    ThemStoreError,
+    validate_them_snapshot_bytes,
+    validate_them_snapshot_file,
+)
 from ombrebrain.you.store import (
     YouStoreError,
     validate_you_snapshot_bytes,
@@ -297,6 +302,10 @@ class MigrateEngine:
         self._you_db_path: str = ""
         self._you_service: Any = None
         self._you_tool_gate: Any = None
+        self._them_db_bytes: Optional[bytes] = None
+        self._them_db_path: str = ""
+        self._them_service: Any = None
+        self._them_tool_gate: Any = None
         self._parse_temp_dir: str = ""
         self._parsed_at_monotonic: float = 0.0
         self._total_buckets: int = 0
@@ -369,6 +378,8 @@ class MigrateEngine:
         self._source_members = {}
         self._you_db_bytes = None
         self._you_db_path = ""
+        self._them_db_bytes = None
+        self._them_db_path = ""
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -672,6 +683,8 @@ class MigrateEngine:
         self._source_members = dict(parsed.get("source_members") or {})
         self._you_db_bytes = parsed.get("you_db_bytes")
         self._you_db_path = str(parsed.get("you_db_path") or "")
+        self._them_db_bytes = parsed.get("them_db_bytes")
+        self._them_db_path = str(parsed.get("them_db_path") or "")
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -809,6 +822,8 @@ class MigrateEngine:
         source_members: dict[str, bytes | str] = {}
         you_db_bytes: Optional[bytes] = None
         you_db_path = ""
+        them_db_bytes: Optional[bytes] = None
+        them_db_path = ""
         referenced_sources: set[str] = set()
         files: dict[str, bytes | str] = package["files"]
         names = set(files)
@@ -852,6 +867,18 @@ class MigrateEngine:
                     validate_you_snapshot_bytes(you_db_bytes)
             except YouStoreError as exc:
                 raise BackupArchiveError("You 快照结构校验失败") from exc
+
+        if "them/them.sqlite3" in names:
+            them_source = files["them/them.sqlite3"]
+            try:
+                if disk_backed:
+                    them_db_path = str(them_source)
+                    validate_them_snapshot_file(them_db_path)
+                else:
+                    them_db_bytes = bytes(them_source)
+                    validate_them_snapshot_bytes(them_db_bytes)
+            except ThemStoreError as exc:
+                raise BackupArchiveError("them 快照结构校验失败") from exc
 
         # 3) 原文证据按文件名中的内容哈希预检。旧版备份可能完全
         # 没有 sources/，保持可导入并显式告警；但只要包已声称携带证据，
@@ -958,6 +985,8 @@ class MigrateEngine:
             "source_members": source_members,
             "you_db_bytes": you_db_bytes,
             "you_db_path": you_db_path,
+            "them_db_bytes": them_db_bytes,
+            "them_db_path": them_db_path,
             "integrity_verified": package["integrity_verified"],
             "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
@@ -1119,25 +1148,31 @@ class MigrateEngine:
             ]
             await self._schedule_reindex()
 
-            if self._you_db_bytes or self._you_db_path:
-                exact_restore = (
-                    len(imported_id_map) == len(self._parsed_buckets)
-                    and all(source_id == target_id for source_id, target_id in imported_id_map.items())
-                )
-                if exact_restore:
-                    try:
-                        await _to_thread_reaped(
-                            self._install_you_snapshot,
-                            buckets_dir,
-                        )
-                    except Exception as exc:
-                        message = f"You 快照恢复失败，已保留当前状态: {exc}"
-                        logger.warning("[migrate] %s", message)
-                        self._apply_errors.append(message)
-                else:
+            # 两个模块各自判断有没有快照要装。exact_restore 只算一次：
+            # 它问的是「这批记忆是不是按原 ID 完整导入的」，与哪个模块无关。
+            exact_restore = (
+                len(imported_id_map) == len(self._parsed_buckets)
+                and all(source_id == target_id for source_id, target_id in imported_id_map.items())
+            )
+            for 标签, 有快照, 安装 in (
+                ("You", bool(self._you_db_bytes or self._you_db_path),
+                 self._install_you_snapshot),
+                ("them", bool(self._them_db_bytes or self._them_db_path),
+                 self._install_them_snapshot),
+            ):
+                if not 有快照:
+                    continue
+                if not exact_restore:
                     self._apply_errors.append(
-                        "You 快照未恢复：记忆未按原 ID 完整导入"
+                        f"{标签} 快照未恢复：记忆未按原 ID 完整导入"
                     )
+                    continue
+                try:
+                    await _to_thread_reaped(安装, buckets_dir)
+                except Exception as exc:
+                    message = f"{标签} 快照恢复失败，已保留当前状态: {exc}"
+                    logger.warning("[migrate] %s", message)
+                    self._apply_errors.append(message)
 
             invalidate = getattr(self._bucket_mgr, "_invalidate_bm25", None)
             if callable(invalidate):
@@ -1164,34 +1199,62 @@ class MigrateEngine:
         self._you_service = service
         self._you_tool_gate = tool_gate
 
-    def _install_you_snapshot(self, buckets_dir: str) -> None:
+    def attach_them_runtime(self, service: Any, tool_gate: Any) -> None:
+        self._them_service = service
+        self._them_tool_gate = tool_gate
+
+    def _install_module_snapshot(
+        self,
+        buckets_dir: str,
+        *,
+        目录名: str,
+        文件名: str,
+        标签: str,
+        源路径: str,
+        源字节: Optional[bytes],
+        校验,
+        service: Any,
+        gate: Any,
+    ) -> None:
+        """把一份模块库快照落进 vault，落定之后同步该模块的 MCP 显隐。
+
+        you 与 them 共用这一套。两边的恢复语义本来就一样，各写一份的结果是
+        其中一边慢慢漏掉某个检查——而这里每一个检查都在防一件具体的事：
+        符号链接（把写入引到 vault 之外）、先校验后 os.replace（半份库不落地）、
+        以及恢复完必须重新对齐工具显隐（库里说开着、清单里没有，反过来更糟）。
+        """
         base = os.path.abspath(buckets_dir)
-        root = os.path.join(base, ".you")
+        root = os.path.join(base, 目录名)
         if os.path.lexists(root) and os.path.islink(root):
-            raise BackupArchiveError("You 恢复目录不能是符号链接")
+            raise BackupArchiveError(f"{标签} 恢复目录不能是符号链接")
         os.makedirs(root, exist_ok=True)
-        target = os.path.join(root, "you.sqlite3")
+        target = os.path.join(root, 文件名)
         if os.path.lexists(target) and os.path.islink(target):
-            raise BackupArchiveError("You 恢复目标不能是符号链接")
-        descriptor, temp_path = tempfile.mkstemp(prefix="you-restore-", suffix=".db", dir=root)
+            raise BackupArchiveError(f"{标签} 恢复目标不能是符号链接")
+        descriptor, temp_path = tempfile.mkstemp(
+            prefix=f"{标签.lower()}-restore-", suffix=".db", dir=root
+        )
         try:
             with os.fdopen(descriptor, "wb") as output:
-                if self._you_db_path:
-                    with open(self._you_db_path, "rb") as source:
+                if 源路径:
+                    with open(源路径, "rb") as source:
                         shutil.copyfileobj(source, output, length=1024 * 1024)
                 else:
-                    output.write(self._you_db_bytes or b"")
+                    output.write(源字节 or b"")
                 output.flush()
                 os.fsync(output.fileno())
-            validate_you_snapshot_file(temp_path)
+            校验(temp_path)
             os.replace(_win_long_path(temp_path), _win_long_path(target))
         finally:
             _safe_unlink(temp_path)
 
-        service = self._you_service
-        gate = self._you_tool_gate
         if service is None or gate is None:
             return
+        # 整库被替换掉了，缓存的开关状态一定是旧的。
+        try:
+            service.store.invalidate_state_cache()
+        except Exception:
+            pass
         state = service.status()
         try:
             gate.sync(state.enabled)
@@ -1205,7 +1268,33 @@ class MigrateEngine:
                 gate.sync(False)
             except Exception:
                 pass
-            raise BackupArchiveError("You MCP 状态同步失败")
+            raise BackupArchiveError(f"{标签} MCP 状态同步失败")
+
+    def _install_you_snapshot(self, buckets_dir: str) -> None:
+        self._install_module_snapshot(
+            buckets_dir,
+            目录名=".you",
+            文件名="you.sqlite3",
+            标签="You",
+            源路径=self._you_db_path,
+            源字节=self._you_db_bytes,
+            校验=validate_you_snapshot_file,
+            service=self._you_service,
+            gate=self._you_tool_gate,
+        )
+
+    def _install_them_snapshot(self, buckets_dir: str) -> None:
+        self._install_module_snapshot(
+            buckets_dir,
+            目录名=".them",
+            文件名="them.sqlite3",
+            标签="them",
+            源路径=self._them_db_path,
+            源字节=self._them_db_bytes,
+            校验=validate_them_snapshot_file,
+            service=self._them_service,
+            gate=self._them_tool_gate,
+        )
 
     def _install_source_members(self, buckets_dir: str) -> None:
         source_limit = self._source_content_limit()

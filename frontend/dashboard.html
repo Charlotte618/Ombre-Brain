@@ -2614,6 +2614,57 @@
       </div>
     </div>
 
+    <!-- them 只暴露开关、每人配额、和称呼名册；认识本身不进 Dashboard。 -->
+    <div class="config-section" id="sec-them" data-sgroup="basics">
+      <h3>他们 <span class="sec-en">Them</span></h3>
+      <p id="them-setting-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        <span style="display:block;">在长期相处中慢慢认识你身边的人</span>
+        <span style="display:block;">你只看得到、也只改得动他们叫什么；具体的认识只属于它自己。</span>
+        <span style="display:block;">关闭后不再更新或使用，不影响其他功能。</span>
+      </p>
+      <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
+        <span id="them-toggle-label">关闭</span>
+        <span class="hw-switch" id="them-enabled-sw" role="switch" tabindex="0"
+          aria-checked="false" aria-labelledby="them-toggle-label" aria-describedby="them-setting-description"
+          onclick="toggleThemSetting(this)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleThemSetting(this);}"></span>
+        <input type="checkbox" id="them-enabled" style="display:none" aria-hidden="true">
+      </div>
+      <div id="them-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
+
+      <div id="them-detail" style="display:none;margin-top:14px;">
+        <label style="display:block;font-size:12px;color:var(--text-dim);margin-bottom:6px;">
+          每个人最多记多少（token）
+        </label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="number" id="them-quota" min="200" max="4000" step="100"
+            style="width:110px;" aria-describedby="them-quota-hint">
+          <button class="btn-sm" onclick="saveThemQuota()">保存</button>
+        </div>
+        <p id="them-quota-hint" style="font-size:11px;color:var(--text-dim);margin:6px 0 0;">
+          200–4000。写满了它会自己去合并，不会悄悄挤掉旧的。
+        </p>
+
+        <div style="margin-top:16px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <span style="font-size:12px;color:var(--text-dim);">记住的人</span>
+            <button class="btn-sm" onclick="loadThemPeople()">刷新</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <input type="text" id="them-new-name" placeholder="登记一个你认识的人（多个称呼用顿号分开）"
+              style="flex:1;" aria-label="登记一个你认识的人">
+            <button class="btn-sm" onclick="addThemPerson()">登记</button>
+          </div>
+          <div id="them-people-list" style="font-size:13px;"></div>
+          <p style="font-size:11px;color:var(--text-dim);margin:8px 0 0;line-height:1.6;">
+            你登记的人，它记下的认识你看得到，也可以留言纠错；它自己认识的人，你只看得到称呼。<br>
+            改了称呼、或者留了言，它都会在下一次回想时被告知一次，说过就过去了。<br>
+            改不改、信不信由它自己定——你写的这些不占它的记忆额度。
+          </p>
+        </div>
+      </div>
+    </div>
+
     <!-- ② 服务 -->
     <div class="config-section" id="sec-service" data-sgroup="advanced">
       <h3>服务 <span class="sec-en">Service</span></h3>
@@ -4437,6 +4488,254 @@ async function toggleYouSetting(control) {
   }
 }
 
+
+var _themStateRevision = 0;
+var _themToggleBusy = false;
+var _themPeople = [];
+
+function renderThemSetting(enabled, message, isError) {
+  setHwSwitch('them-enabled', !!enabled);
+  var label = document.getElementById('them-toggle-label');
+  var status = document.getElementById('them-setting-msg');
+  var control = document.getElementById('them-enabled-sw');
+  var detail = document.getElementById('them-detail');
+  if (label) label.textContent = enabled ? '开启' : '关闭';
+  if (status) {
+    status.textContent = message || '';
+    status.style.color = isError ? 'var(--negative)' : 'var(--text-dim)';
+  }
+  if (control) {
+    control.setAttribute('aria-disabled', _themToggleBusy ? 'true' : 'false');
+    control.style.pointerEvents = _themToggleBusy ? 'none' : '';
+    control.style.opacity = _themToggleBusy ? '.65' : '';
+  }
+  // 关掉之后连名册都不该留在页面上：它是关于具体的人的。
+  if (detail) detail.style.display = enabled ? 'block' : 'none';
+}
+
+async function loadThemSetting() {
+  try {
+    var response = await authFetch('/api/settings/them');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    var quota = document.getElementById('them-quota');
+    if (quota) quota.value = Number(data.max_tokens_per_person) || 1500;
+    renderThemSetting(data.enabled === true, '', false);
+    if (data.enabled === true) await loadThemPeople();
+  } catch (error) {
+    renderThemSetting(false, '加载失败', true);
+  }
+}
+
+async function toggleThemSetting(control) {
+  if (_themToggleBusy || !control) return;
+  var desired = control.getAttribute('aria-checked') !== 'true';
+  _themToggleBusy = true;
+  renderThemSetting(desired, '保存中…', false);
+  try {
+    var response = await authFetch('/api/settings/them', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: desired, state_revision: _themStateRevision}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    renderThemSetting(data.enabled === true, '', false);
+    if (data.enabled === true) await loadThemPeople();
+  } catch (error) {
+    await loadThemSetting();
+    var status = document.getElementById('them-setting-msg');
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  } finally {
+    _themToggleBusy = false;
+  }
+}
+
+async function saveThemQuota() {
+  var input = document.getElementById('them-quota');
+  var status = document.getElementById('them-setting-msg');
+  if (!input) return;
+  try {
+    var response = await authFetch('/api/settings/them', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        enabled: true,
+        state_revision: _themStateRevision,
+        max_tokens_per_person: Number(input.value),
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    input.value = Number(data.max_tokens_per_person) || 1500;
+    if (status) { status.textContent = '已保存'; status.style.color = 'var(--text-dim)'; }
+  } catch (error) {
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  }
+}
+
+async function loadThemPeople() {
+  var box = document.getElementById('them-people-list');
+  if (!box) return;
+  try {
+    var response = await authFetch('/api/them/people');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _themPeople = data.people || [];
+    renderThemPeople();
+  } catch (error) {
+    box.innerHTML = '<span style="color:var(--negative);">名册加载失败</span>';
+  }
+}
+
+function renderThemPeople() {
+  var box = document.getElementById('them-people-list');
+  if (!box) return;
+  if (!_themPeople.length) {
+    box.innerHTML = '<span style="color:var(--text-dim);">还没有记住的人。</span>';
+    return;
+  }
+  var html = '';
+  for (var i = 0; i < _themPeople.length; i++) {
+    var p = _themPeople[i];
+    var 自己认识的 = p.origin === 'human';
+    html += '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;">';
+    html += '<div style="display:flex;gap:8px;align-items:center;">';
+    html += '<input type="text" value="' + esc((p.names || []).join('、')) + '"'
+         + ' id="them-names-' + esc(p.person_id) + '" style="flex:1;"'
+         + ' aria-label="称呼，多个用顿号分开">';
+    html += '<button class="btn-sm" onclick="saveThemNames(\'' + esc(p.person_id) + '\')">改称呼</button>';
+    html += '</div>';
+    html += '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">'
+         + (自己认识的 ? '你登记的人 · 它记下的认识你看得到，也可以留言纠错'
+                       : '它自己认识的人 · 你只看得到称呼')
+         + '</div>';
+    if (自己认识的) {
+      var claims = p.claims || [];
+      if (claims.length) {
+        html += '<ul style="margin:8px 0 0;padding-left:18px;font-size:12px;line-height:1.7;">';
+        for (var j = 0; j < claims.length; j++) {
+          html += '<li>' + esc(claims[j].content)
+               + (claims[j].lifecycle === 'candidate'
+                  ? ' <span style="color:var(--text-dim);">（还在确认中）</span>' : '')
+               + '</li>';
+        }
+        html += '</ul>';
+      } else {
+        html += '<div style="font-size:12px;color:var(--text-dim);margin-top:8px;">它还没写下关于这个人的任何认识。</div>';
+      }
+      html += '<div style="display:flex;gap:8px;margin-top:8px;">';
+      html += '<input type="text" id="them-note-' + esc(p.person_id) + '"'
+           + ' placeholder="哪里记错了？告诉它一次" style="flex:1;">';
+      html += '<button class="btn-sm" onclick="saveThemNote(\'' + esc(p.person_id) + '\')">留言</button>';
+      html += '</div>';
+      var pending = p.pending_notes || [];
+      if (pending.length) {
+        html += '<div style="font-size:11px;color:var(--text-dim);margin-top:6px;">'
+             + '还没被它读到的留言 ' + pending.length + ' 条，下次回想时会一起给它。</div>';
+      }
+    }
+    html += '</div>';
+  }
+  box.innerHTML = html;
+}
+
+async function saveThemNames(personId) {
+  var input = document.getElementById('them-names-' + personId);
+  var status = document.getElementById('them-setting-msg');
+  if (!input) return;
+  var names = input.value.split(/[、,，]/).map(function (n) { return n.trim(); })
+    .filter(function (n) { return n; });
+  var current = null;
+  for (var i = 0; i < _themPeople.length; i++) {
+    if (_themPeople[i].person_id === personId) current = _themPeople[i];
+  }
+  try {
+    var response = await authFetch('/api/them/people', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        person_id: personId,
+        names: names,
+        revision: current ? current.revision : 0,
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    if (status) { status.textContent = '称呼已改，它下次回想时会被告知一次'; status.style.color = 'var(--text-dim)'; }
+    await loadThemPeople();
+  } catch (error) {
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  }
+}
+
+async function saveThemNote(personId) {
+  var input = document.getElementById('them-note-' + personId);
+  var status = document.getElementById('them-setting-msg');
+  if (!input || !input.value.trim()) return;
+  try {
+    var response = await authFetch('/api/them/note', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({person_id: personId, text: input.value.trim()}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '留言失败');
+    input.value = '';
+    if (status) { status.textContent = '留言已记下，下次回想时给它一次'; status.style.color = 'var(--text-dim)'; }
+    await loadThemPeople();
+  } catch (error) {
+    if (status) {
+      status.textContent = error && error.message ? error.message : '留言失败';
+      status.style.color = 'var(--negative)';
+    }
+  }
+}
+
+async function addThemPerson() {
+  var input = document.getElementById('them-new-name');
+  var status = document.getElementById('them-setting-msg');
+  if (!input || !input.value.trim()) return;
+  var names = input.value.split(/[、,，]/).map(function (n) { return n.trim(); })
+    .filter(function (n) { return n; });
+  try {
+    var response = await authFetch('/api/them/people/new', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({names: names}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '登记失败');
+    input.value = '';
+    if (status) { status.textContent = '登记好了'; status.style.color = 'var(--text-dim)'; }
+    await loadThemPeople();
+  } catch (error) {
+    if (status) {
+      status.textContent = error && error.message ? error.message : '登记失败';
+      status.style.color = 'var(--negative)';
+    }
+  }
+}
+
 async function saveSamplingSettings() {
   const msg = document.getElementById('sampling-msg');
   msg.style.color = 'var(--text-dim)';
@@ -4797,6 +5096,7 @@ function activateDashboardTab(tab) {
         loadGithubStatus(),
         loadSamplingSettings(),
         loadYouSetting(),
+        loadThemSetting(),
         loadEnvVars(),
         loadHostVault(),
         loadLocalEmbStatus()

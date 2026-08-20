@@ -188,6 +188,80 @@ def register(mcp) -> None:
             headers={"Cache-Control": "no-store"},
         )
 
+    @mcp.custom_route("/api/them/people/new", methods=["POST"])
+    async def add_them_person(request: Request) -> Response:
+        """登记一个自己认识的人。
+
+        这一份的认识对人类可见，也只有这一份能留言纠错——
+        模型自己认识的人，人类连它记了什么都看不见，那种情况下的「纠错」
+        是在对着看不见的东西提意见。
+        """
+        error = sh._require_auth(request)
+        if error:
+            return error
+        try:
+            body = await sh._read_json_object(request)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "无效 JSON"}, status_code=400)
+        if set(body) != {"names"}:
+            return JSONResponse({"error": "只接受 names"}, status_code=400)
+        names = body.get("names")
+        if not isinstance(names, list) or not all(
+            isinstance(name, str) for name in names
+        ):
+            return JSONResponse({"error": "names 必须是字符串数组"}, status_code=400)
+        try:
+            person = sh.them_service.add_person(names)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except ThemStoreError:
+            return JSONResponse({"error": "them 暂时不可用"}, status_code=503)
+        return JSONResponse(
+            {
+                "person_id": person.id,
+                "names": list(person.names),
+                "revision": person.revision,
+                "origin": person.origin,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @mcp.custom_route("/api/them/note", methods=["POST"])
+    async def leave_them_note(request: Request) -> Response:
+        """给模型留一条纠错。
+
+        下次浮现时在尾部交给它一次，读完就清。**不占每人的 token 配额**——
+        配额管的是模型自己沉淀了多少，人类说的话不该挤掉模型的记忆。
+        改不改、信不信由模型自己定：这是纠错，不是命令。
+        """
+        error = sh._require_auth(request)
+        if error:
+            return error
+        try:
+            body = await sh._read_json_object(request)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "无效 JSON"}, status_code=400)
+        if set(body) != {"person_id", "text"}:
+            return JSONResponse({"error": "只接受 person_id 和 text"}, status_code=400)
+        person_id = body.get("person_id")
+        text = body.get("text")
+        if not isinstance(person_id, str) or not isinstance(text, str):
+            return JSONResponse({"error": "参数格式无效"}, status_code=400)
+        try:
+            person = sh.them_service.leave_note(person_id, text)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except ThemStoreError:
+            return JSONResponse({"error": "them 暂时不可用"}, status_code=503)
+        return JSONResponse(
+            {
+                "person_id": person.id,
+                "pending_notes": [dict(note) for note in person.pending_notes],
+                "revision": person.revision,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @mcp.custom_route("/api/them/people", methods=["POST"])
     async def rename_them_person(request: Request) -> Response:
         """改一个人的正名与昵称。人类唯一改得动的东西。

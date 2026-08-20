@@ -1247,6 +1247,7 @@ except Exception as _them_gate_exc:
         pass
 _wsh.init_runtime(you_tool_gate=you_tool_gate, them_tool_gate=them_tool_gate)
 migrate_engine.attach_you_runtime(you_service, you_tool_gate)
+migrate_engine.attach_them_runtime(them_service, them_tool_gate)
 
 
 # =============================================================

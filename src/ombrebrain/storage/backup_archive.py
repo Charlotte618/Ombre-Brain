@@ -32,6 +32,11 @@ from ombrebrain.you.store import (
     validate_you_snapshot_bytes,
     validate_you_snapshot_file,
 )
+from ombrebrain.them import (
+    ThemStoreError,
+    validate_them_snapshot_bytes,
+    validate_them_snapshot_file,
+)
 
 
 MANIFEST_NAME = "backup_manifest.json"
@@ -57,6 +62,8 @@ MIGRATE_MAX_SOURCE_BYTES = HARD_MAX_SOURCE_BYTES
 MIGRATE_MAX_EXPORT_META_BYTES = 1 * MIB
 MIGRATE_MAX_EMBEDDINGS_DB_BYTES = 512 * MIB
 MIGRATE_MAX_YOU_DB_BYTES = 128 * MIB
+# them 与 you 同一档上限：两边存的是同构的东西，没有理由给一个更宽的口子。
+MIGRATE_MAX_THEM_DB_BYTES = 128 * MIB
 MIGRATE_MIN_FREE_RESERVE_BYTES = 64 * MIB
 
 
@@ -92,6 +99,8 @@ def _migration_member_limit(path: str) -> int:
         return MIGRATE_MAX_EMBEDDINGS_DB_BYTES
     if path == "you/you.sqlite3":
         return MIGRATE_MAX_YOU_DB_BYTES
+    if path == "them/them.sqlite3":
+        return MIGRATE_MAX_THEM_DB_BYTES
     if path == "export_meta.json":
         return MIGRATE_MAX_EXPORT_META_BYTES
     parts = PurePosixPath(path).parts
@@ -329,18 +338,25 @@ def build_export_archive(
     db_bytes = snapshot_sqlite(embedding_db_path)
     if db_bytes:
         files["embeddings.db"] = db_bytes
-    you_db_path = Path(buckets_dir).resolve() / ".you" / "you.sqlite3"
-    you_bytes = snapshot_sqlite(
-        str(you_db_path),
-        label="you/you.sqlite3",
-        max_bytes=MIGRATE_MAX_YOU_DB_BYTES,
-    )
-    if you_bytes:
+    # 两个模块的库都进备份。任一模块没开过就没有库文件，snapshot_sqlite
+    # 返回空，那一条不进归档。
+    for 相对名, 目录名, 上限, 校验, 错误类型, 标签 in (
+        ("you/you.sqlite3", ".you", MIGRATE_MAX_YOU_DB_BYTES,
+         validate_you_snapshot_bytes, YouStoreError, "You"),
+        ("them/them.sqlite3", ".them", MIGRATE_MAX_THEM_DB_BYTES,
+         validate_them_snapshot_bytes, ThemStoreError, "them"),
+    ):
+        db_path = Path(buckets_dir).resolve() / 目录名 / 相对名.split("/", 1)[1]
+        module_bytes = snapshot_sqlite(
+            str(db_path), label=相对名, max_bytes=上限
+        )
+        if not module_bytes:
+            continue
         try:
-            validate_you_snapshot_bytes(you_bytes)
-        except YouStoreError as exc:
-            raise BackupArchiveError("You 快照结构校验失败") from exc
-        files["you/you.sqlite3"] = you_bytes
+            校验(module_bytes)
+        except 错误类型 as exc:
+            raise BackupArchiveError(f"{标签} 快照结构校验失败") from exc
+        files[相对名] = module_bytes
     meta_bytes = json.dumps(
         export_meta, ensure_ascii=False, indent=2, default=str
     ).encode("utf-8")
@@ -443,6 +459,8 @@ def build_export_archive_file(
     os.close(snapshot_fd)
     you_snapshot_fd, you_snapshot_path = tempfile.mkstemp(prefix="ombre-you-", suffix=".db")
     os.close(you_snapshot_fd)
+    them_snapshot_fd, them_snapshot_path = tempfile.mkstemp(prefix="ombre-them-", suffix=".db")
+    os.close(them_snapshot_fd)
     entries: list[dict[str, Any]] = []
     total_uncompressed = 0
 
@@ -506,22 +524,26 @@ def build_export_archive_file(
                     )
                 )
 
-            you_db_path = base / ".you" / "you.sqlite3"
-            if _snapshot_sqlite_to_file(
-                str(you_db_path),
-                you_snapshot_path,
-                label="you/you.sqlite3",
-                max_bytes=MIGRATE_MAX_YOU_DB_BYTES,
+            for 相对名, 目录名, 暂存, 上限, 校验, 错误类型, 标签 in (
+                ("you/you.sqlite3", ".you", you_snapshot_path,
+                 MIGRATE_MAX_YOU_DB_BYTES, validate_you_snapshot_file,
+                 YouStoreError, "You"),
+                ("them/them.sqlite3", ".them", them_snapshot_path,
+                 MIGRATE_MAX_THEM_DB_BYTES, validate_them_snapshot_file,
+                 ThemStoreError, "them"),
             ):
+                db_path = base / 目录名 / 相对名.split("/", 1)[1]
+                if not _snapshot_sqlite_to_file(
+                    str(db_path), 暂存, label=相对名, max_bytes=上限
+                ):
+                    continue
                 try:
-                    validate_you_snapshot_file(you_snapshot_path)
-                except YouStoreError as exc:
-                    raise BackupArchiveError("You 快照结构校验失败") from exc
+                    校验(暂存)
+                except 错误类型 as exc:
+                    raise BackupArchiveError(f"{标签} 快照结构校验失败") from exc
                 record(
                     _stream_file_member(
-                        archive,
-                        source=Path(you_snapshot_path),
-                        arc_path="you/you.sqlite3",
+                        archive, source=Path(暂存), arc_path=相对名
                     )
                 )
 
@@ -576,10 +598,11 @@ def build_export_archive_file(
             os.unlink(snapshot_path)
         except OSError:
             pass
-        try:
-            os.unlink(you_snapshot_path)
-        except OSError:
-            pass
+        for 暂存 in (you_snapshot_path, them_snapshot_path):
+            try:
+                os.unlink(暂存)
+            except OSError:
+                pass
 
 
 def validate_sqlite_file(db_path: str) -> None:

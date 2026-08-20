@@ -33,6 +33,8 @@ from ..you.models import (
 )
 
 __all__ = [
+    "ORIGIN_HUMAN",
+    "ORIGIN_MODEL",
     "VALID_ASPECTS",
     "EvidenceEdge",
     "ReviewReceipt",
@@ -65,14 +67,38 @@ def normalize_name(value: object) -> str:
     return text
 
 
+# 这个人是谁登记的。决定人类看得见多少（rule.md 13.3）。
+ORIGIN_MODEL = "model"
+ORIGIN_HUMAN = "human"
+VALID_ORIGINS = frozenset({ORIGIN_MODEL, ORIGIN_HUMAN})
+
+# 一个人身上最多挂几条待读的人类留言。留言是给模型看一次的提醒，不是收件箱；
+# 堆到这个数还没被读走，说明浮现根本没发生，再堆下去也没用。
+MAX_PENDING_NOTES = 10
+# 单条留言的长度上限。纠错是「你把这件事记错了」，不是一封信。
+MAX_NOTE_CHARS = 500
+
+
 @dataclass(frozen=True)
 class Person:
     """一个被记住的人。名字是它的内部字段，而且是多值的。
 
-    `pending_rename` 是人类在前端改过称呼之后留下的一张待读回执：
-    下次浮现时告诉模型一次「你当时记的是 A，现在登记的是 B」，读完就清。
-    存的是**改动前的名字**——只说新名字的话，模型对不上自己写在认识正文里的
-    那个旧称呼，提醒就等于没提。
+    ## 两种来源，区别只在人类看得见多少
+
+    - `origin="model"`：模型自己在相处里认出来的人。人类只看得见称呼。
+    - `origin="human"`：人类主动登记的人。人类本来就认识他，所以模型写下的
+      认识对人类可见——**纠错要有对象，看不见就只能瞎猜**。
+
+    模型对两种人一视同仁：同样的两桶三日门槛，同样写得进去。可见性是人类那一侧
+    的事，不该反过来改变模型能记什么。
+
+    ## 两张待读回执
+
+    `pending_rename` 是人类改过称呼之后留下的；`pending_notes` 是人类留下的
+    纠错留言。都只念一次：反复念同一句就不是纠错，是施压。
+
+    留言**不占每人的 token 配额**——配额管的是模型自己沉淀了多少，
+    人类说的话不该挤掉模型的记忆。
     """
 
     id: str
@@ -83,6 +109,8 @@ class Person:
     revision: int = 1
     pending_rename: tuple[str, ...] = ()
     renamed_at: str = ""
+    origin: str = ORIGIN_MODEL
+    pending_notes: tuple[dict[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", require_id(self.id, "person"))
@@ -115,10 +143,55 @@ class Person:
                 previous.append(name)
         object.__setattr__(self, "pending_rename", tuple(previous[:MAX_NAMES]))
         object.__setattr__(self, "renamed_at", str(self.renamed_at or ""))
+        origin = str(self.origin or ORIGIN_MODEL).strip().lower()
+        if origin not in VALID_ORIGINS:
+            raise ValueError("invalid person origin")
+        object.__setattr__(self, "origin", origin)
+        notes: list[dict[str, str]] = []
+        for item in self.pending_notes or ():
+            if not isinstance(item, Mapping):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text or "\x00" in text:
+                continue
+            notes.append(
+                {
+                    "text": text[:MAX_NOTE_CHARS],
+                    "at": str(item.get("at") or "").strip()[:80],
+                }
+            )
+        object.__setattr__(self, "pending_notes", tuple(notes[:MAX_PENDING_NOTES]))
 
     @classmethod
-    def new(cls, names: list[str] | tuple[str, ...]) -> "Person":
-        return cls(id=new_id("person"), names=tuple(names))
+    def new(
+        cls,
+        names: list[str] | tuple[str, ...],
+        *,
+        origin: str = ORIGIN_MODEL,
+    ) -> "Person":
+        return cls(id=new_id("person"), names=tuple(names), origin=origin)
+
+    @property
+    def human_visible(self) -> bool:
+        """人类看得见这个人身上的认识吗。
+
+        只有人类自己登记的人才可见。模型自己认出来的人，人类只看得见称呼——
+        那是 rule.md 13.3 划的线，`them` 属于模型。
+        """
+        return self.origin == ORIGIN_HUMAN
+
+    def with_note(self, text: str, *, at: str | None = None) -> "Person":
+        """人类留一条纠错。攒着，等下次浮现一起交给模型。
+
+        不动 `activation_count` 与 `last_active`：人类留言不是「这个人被提起
+        了一次」，算进去会凭空抬高衰减权重。同 `renamed_to`。
+        """
+        note = {"text": str(text or "").strip()[:MAX_NOTE_CHARS], "at": at or utc_now()}
+        return replace(self, pending_notes=(*self.pending_notes, note))
+
+    def notes_read(self) -> "Person":
+        """留言念过了就清。反复念同一句不是纠错，是施压。"""
+        return replace(self, pending_notes=())
 
     @property
     def display_name(self) -> str:
@@ -185,6 +258,8 @@ class Person:
             revision=value.get("revision", 1),
             pending_rename=tuple(value.get("pending_rename") or ()),
             renamed_at=value.get("renamed_at", "") or "",
+            origin=value.get("origin") or ORIGIN_MODEL,
+            pending_notes=tuple(value.get("pending_notes") or ()),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -198,6 +273,8 @@ class Person:
             "revision": self.revision,
             "pending_rename": list(self.pending_rename),
             "renamed_at": self.renamed_at,
+            "origin": self.origin,
+            "pending_notes": [dict(note) for note in self.pending_notes],
         }
 
 

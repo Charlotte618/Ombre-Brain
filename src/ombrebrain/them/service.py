@@ -49,7 +49,13 @@ from ..you.models import (
 )
 from ..you.service import partition_by_live_evidence
 
-from .models import THEM_POLICY_VERSION, Person, ThemClaim
+from .models import (
+    MAX_PENDING_NOTES,
+    ORIGIN_HUMAN,
+    THEM_POLICY_VERSION,
+    Person,
+    ThemClaim,
+)
 from .safety import contains_forbidden_subject, leaks_protected_text
 from .store import ThemStore, ThemStoreError
 
@@ -170,23 +176,92 @@ class ThemService:
     # --- 人类唯一能碰的那一处：称呼 ---
 
     def list_people(self) -> list[dict[str, Any]]:
-        """给前端看的名册。**只有称呼，没有任何一条认识。**
+        """给前端看的名册。看得见多少，取决于这个人是谁登记的。
 
-        rule.md 13.3 的口子只开到这里：人类看得见、也只改得动这个人叫什么。
-        认识本身、依据、历史一概不出现——那是模型的，不是给人读的。
+        - 模型自己认出来的人：**只有称呼**。认识、依据、历史一概不出现——
+          那是模型的，不是给人读的。
+        - 人类自己登记的人：连模型写下的认识一起给。人类本来就认识他，
+          而且要能纠错——看不见就只能瞎猜。
         """
         try:
             scope = self._require_scope()
         except ThemStoreError:
             return []
-        return [
-            {
+        名册: list[dict[str, Any]] = []
+        for person in self.store.list_persons(scope):
+            条目: dict[str, Any] = {
                 "person_id": person.id,
                 "names": list(person.names),
                 "revision": person.revision,
+                "origin": person.origin,
+                "pending_notes": [dict(note) for note in person.pending_notes],
             }
-            for person in self.store.list_persons(scope)
-        ]
+            if person.human_visible:
+                条目["claims"] = [
+                    {
+                        "claim_id": claim.id,
+                        "aspect": claim.aspect,
+                        "content": claim.content,
+                        "lifecycle": claim.lifecycle,
+                    }
+                    for claim in self.store.list_claims(scope, person_id=person.id)
+                    if claim.lifecycle in {"formal", "candidate"}
+                ]
+            名册.append(条目)
+        return 名册
+
+    def add_person(self, names: list[str]) -> Person:
+        """人类登记一个自己认识的人。
+
+        这一份的认识对人类可见（`origin="human"`）。模型照样能往上写，
+        门槛也一样——可见性是人类那一侧的事，不该反过来改变模型能记什么。
+        """
+        scope = self._require_scope()
+        cleaned = list(
+            dict.fromkeys(
+                str(name or "").strip() for name in names or [] if str(name or "").strip()
+            )
+        )
+        if not cleaned:
+            raise ValueError("至少要给一个称呼。")
+        for name in cleaned:
+            existing = self.store.find_person_by_name(scope, name)
+            if existing is not None:
+                raise ValueError(
+                    f"「{existing.display_name}」已经用了「{name}」这个称呼。"
+                    "两个人共用一个名字的话，姓名命中会同时把两份认识都拉出来。"
+                )
+        return self.store.put_person(scope, Person.new(cleaned, origin=ORIGIN_HUMAN))
+
+    def leave_note(self, person_id: str, text: str) -> Person:
+        """人类给模型留一条纠错。
+
+        只对人类自己登记的人开放：模型自己认识的人，人类连它记了什么都看不见，
+        那种情况下的「纠错」是在对着看不见的东西提意见。
+
+        留言攒着，下次浮现时一起交给模型，念一次就清。**不占 token 配额**——
+        配额管的是模型自己沉淀了多少，人类说的话不该挤掉模型的记忆。
+        """
+        scope = self._require_scope()
+        person = self.store.get_person(scope, str(person_id or "").strip())
+        if person is None:
+            raise ValueError(f"没有这个人：{person_id}")
+        if not person.human_visible:
+            raise ValueError(
+                "这个人是它自己认识的，你看不到它记了什么，也就无从纠起。"
+                "留言只对你自己登记的人开放。"
+            )
+        内容 = str(text or "").strip()
+        if not 内容:
+            raise ValueError("留言不能是空的。")
+        if len(person.pending_notes) >= MAX_PENDING_NOTES:
+            raise ValueError(
+                f"这个人身上已经有 {MAX_PENDING_NOTES} 条还没被读走的留言了。"
+                "先让它回想一次，读过之后再留新的。"
+            )
+        return self.store.put_person(
+            scope, person.with_note(内容), expected_revision=person.revision
+        )
 
     def rename_person(
         self, person_id: str, names: list[str], *, expected_revision: int | None = None
@@ -229,6 +304,27 @@ class ThemService:
                 person.revision if expected_revision is None else expected_revision
             ),
         )
+
+    def _take_human_notes(self, scope: Scope, persons: list[Person]) -> list[str]:
+        """把人类留下的纠错取出来，并当场清掉。
+
+        与改名提醒同构：只念一次。清掉之前先写回库，写失败就不返回这一条——
+        宁可漏一次，也不要每次浮现都念同一句。反复念不是纠错，是施压。
+        """
+        notes: list[str] = []
+        for person in persons:
+            if not person.pending_notes:
+                continue
+            条目 = [note["text"] for note in person.pending_notes]
+            try:
+                self.store.put_person(
+                    scope, person.notes_read(), expected_revision=person.revision
+                )
+            except ThemStoreError:
+                continue
+            for 文 in 条目:
+                notes.append(f"关于{person.display_name}：{文}")
+        return notes
 
     def _take_rename_notices(self, scope: Scope, persons: list[Person]) -> list[str]:
         """把这些人身上的待读回执取出来，并当场清掉。
@@ -609,16 +705,29 @@ class ThemService:
         # 哪怕这次的 query 跟那个人毫无关系。挂在命中上的话，一个久不被提起的
         # 人改了名，这条提醒可能几个月都出不来——那时再说已经没有意义了。
         notices = self._take_rename_notices(scope, persons)
+        # 人类的纠错留言同样不看命中，而且**不占每人的 token 配额**：
+        # 配额管的是模型自己沉淀了多少，人类说的话不该挤掉模型的记忆。
+        human_notes = self._take_human_notes(scope, persons)
 
         matched = self._match_persons(query, persons) if query else self._top_persons(persons)
         for person in matched:
             self._touch_person(scope, person)
         块 = await self._render(scope, matched, max_results=max_results) if matched else ""
 
-        if not notices:
-            return 块
-        提醒 = "[信息变迁：有人在前端改了称呼。]\n" + "\n".join(f"- {n}" for n in notices)
-        return f"{提醒}\n\n{块}" if 块 else 提醒
+        段: list[str] = []
+        if 块:
+            段.append(块)
+        if notices:
+            段.append(
+                "[信息变迁：有人在前端改了称呼。]\n"
+                + "\n".join(f"- {n}" for n in notices)
+            )
+        if human_notes:
+            段.append(
+                "[有人给你留了话，是对你记下的东西提出的更正。信不信、改不改由你自己定。]\n"
+                + "\n".join(f"- {n}" for n in human_notes)
+            )
+        return "\n\n".join(段)
 
     async def surface(self, *, query: str = "") -> str:
         """给 breath / dream 用的追加块。

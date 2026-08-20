@@ -207,9 +207,12 @@ class TestPeopleRoutes:
         person = await self._person(service, tmp_path)
         resp = await route_mcp.routes[("GET", "/api/them/people")](JsonRequest())
         people = json.loads(resp.body)["people"]
-        assert people == [
-            {"person_id": person.id, "names": ["Zoey", "小 Z"], "revision": person.revision}
-        ]
+        assert len(people) == 1
+        assert people[0]["person_id"] == person.id
+        assert people[0]["names"] == ["Zoey", "小 Z"]
+        assert people[0]["origin"] == "model"
+        # 模型自己认识的人：名册里不带任何一条认识
+        assert "claims" not in people[0]
 
     @pytest.mark.asyncio
     async def test_改名走乐观并发(self, tmp_path, monkeypatch):

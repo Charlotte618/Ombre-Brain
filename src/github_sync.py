@@ -32,6 +32,11 @@ from ombrebrain.storage.source_store import (
     SourceStore,
     referenced_source_ids_from_markdown,
 )
+from ombrebrain.them import (
+    ThemStore,
+    ThemStoreError,
+    validate_them_snapshot_file,
+)
 from ombrebrain.you import YouStore, YouStoreError, validate_you_snapshot_file
 from utils import _win_long_path
 
@@ -50,6 +55,16 @@ _MAX_RESTORE_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST_FILENAME = "_ombre_backup_manifest.json"
 _SOURCE_REFS_COMPLETE_FIELD = "source_refs_complete"
 _YOU_RELATIVE_PATH = ".you/you.sqlite3"
+_THEM_RELATIVE_PATH = ".them/them.sqlite3"
+# 两个模块的库都进仓库。poluz 2026-08-20：「仓库属于模型，对别人的看法也属于
+# 模型」——呼应 rule.md 第 3 条。them 记的是第三方，所以这一条是她本人的决定，
+# 不是照着 you 抄一遍带进来的。
+_MODULE_SNAPSHOT_PATHS = (_YOU_RELATIVE_PATH, _THEM_RELATIVE_PATH)
+# 每条快照路径对应的校验函数。恢复时按路径分派——用错校验函数等于没校验。
+_SNAPSHOT_VALIDATORS = {
+    _YOU_RELATIVE_PATH: (validate_you_snapshot_file, YouStoreError, "You"),
+    _THEM_RELATIVE_PATH: (validate_them_snapshot_file, ThemStoreError, "them"),
+}
 
 
 class _LazyMarkdownFiles(Mapping[str, bytes]):
@@ -110,16 +125,16 @@ class _LazyMarkdownFiles(Mapping[str, bytes]):
 def _vetted_extra_backup_path(relative: str, full: str) -> str:
     """校验一条来自 vault 之外的额外备份路径，返回规范化后的相对名。
 
-    You 的快照是在临时目录里生成的（要事务一致，不能直接备份活动库），
-    所以它落在 buckets_dir 之外，走不了 _collect_files 那套基于 vault
+    You / them 的快照都是在临时目录里生成的（要事务一致，不能直接备份活动库），
+    所以它们落在 buckets_dir 之外，走不了 _collect_files 那套基于 vault
     相对路径的检查，只能单独把关。
     """
 
     normalized = str(relative).replace("\\", "/")
-    if normalized != _YOU_RELATIVE_PATH:
+    if normalized not in _MODULE_SNAPSHOT_PATHS:
         raise RuntimeError(f"unsupported extra GitHub backup path: {normalized}")
     if not os.path.isfile(full) or os.path.islink(full):
-        raise RuntimeError("You snapshot is unavailable or unsafe")
+        raise RuntimeError(f"{normalized} snapshot is unavailable or unsafe")
     if os.path.getsize(full) > _MAX_FILE_BYTES:
         raise RuntimeError(
             f"GitHub backup file exceeds {_MAX_FILE_BYTES} bytes: {normalized}"
@@ -142,7 +157,7 @@ def _is_backup_relative_path(relative_path: str) -> bool:
     return (
         normalized.endswith(".md")
         or _is_source_relative_path(normalized)
-        or normalized == _YOU_RELATIVE_PATH
+        or normalized in _MODULE_SNAPSHOT_PATHS
     )
 
 
@@ -244,12 +259,21 @@ class GitHubSync:
         """同步记忆、原文证据和可用的 You 快照到 GitHub。"""
         async with self._sync_lock:
             try:
-                with tempfile.TemporaryDirectory(prefix="ombre-github-you-") as temp_dir:
-                    snapshot_path = os.path.join(temp_dir, "you.sqlite3")
+                with tempfile.TemporaryDirectory(prefix="ombre-github-modules-") as temp_dir:
                     extra_paths: dict[str, str] = {}
-                    if YouStore(buckets_dir).snapshot_to(snapshot_path):
-                        validate_you_snapshot_file(snapshot_path)
-                        extra_paths[_YOU_RELATIVE_PATH] = snapshot_path
+                    # 两个模块各导一份。任一模块没开过（库都还没建），
+                    # snapshot_to 返回 False，那一条就不进这次提交。
+                    for relative, store in (
+                        (_YOU_RELATIVE_PATH, YouStore(buckets_dir)),
+                        (_THEM_RELATIVE_PATH, ThemStore(buckets_dir)),
+                    ):
+                        snapshot_path = os.path.join(
+                            temp_dir, relative.replace("/", "_")
+                        )
+                        if store.snapshot_to(snapshot_path):
+                            validator, _, _ = _SNAPSHOT_VALIDATORS[relative]
+                            validator(snapshot_path)
+                            extra_paths[relative] = snapshot_path
                     files = self._collect_files(buckets_dir, extra_paths)
                     if not files:
                         self.last_status = "ok"
@@ -402,6 +426,7 @@ class GitHubSync:
                 buckets_imported = 0
                 sources_imported = 0
                 you_restored = False
+                them_restored = False
                 skipped = 0
                 errors: list[str] = []
                 # 先把远端不可变 blob 全部下载到临时区并完成清单/证据校验。
@@ -457,11 +482,14 @@ class GitHubSync:
                         stage_path = os.path.join(staging_dir, f"{index:05d}.blob")
                         with open(stage_path, "wb") as stage_handle:
                             stage_handle.write(data)
-                        if rel == _YOU_RELATIVE_PATH:
+                        if rel in _SNAPSHOT_VALIDATORS:
+                            validator, error_type, label = _SNAPSHOT_VALIDATORS[rel]
                             try:
-                                validate_you_snapshot_file(stage_path)
-                            except YouStoreError as exc:
-                                raise RuntimeError("You backup snapshot is invalid") from exc
+                                validator(stage_path)
+                            except error_type as exc:
+                                raise RuntimeError(
+                                    f"{label} backup snapshot is invalid"
+                                ) from exc
                         staged[rel] = stage_path
 
                     referenced_sources: set[str] = set()
@@ -554,6 +582,8 @@ class GitHubSync:
                             imported += 1
                             if rel == _YOU_RELATIVE_PATH:
                                 you_restored = True
+                            elif rel == _THEM_RELATIVE_PATH:
+                                them_restored = True
                             elif rel.endswith(".md"):
                                 buckets_imported += 1
                         except Exception as exc:
@@ -578,6 +608,8 @@ class GitHubSync:
                 }
                 if you_restored:
                     result["you_restored"] = True
+                if them_restored:
+                    result["them_restored"] = True
                 return result
         except Exception as e:
             logger.error(f"[github_sync] import failed: {e}")

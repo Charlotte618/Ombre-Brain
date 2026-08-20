@@ -12,7 +12,13 @@
 
 from .models import Person, ThemClaim
 from .service import ThemService
-from .store import ThemStore, ThemStoreError
+from .store import (
+    ThemStore,
+    ThemStoreError,
+    validate_them_snapshot_bytes,
+    validate_them_snapshot_file,
+)
 from .tool_gate import ThemToolGate
 
-__all__ = ["Person", "ThemClaim", "ThemService", "ThemStore", "ThemStoreError", "ThemToolGate"]
+__all__ = ["Person", "ThemClaim", "ThemService", "ThemStore", "ThemStoreError", "ThemToolGate",
+    "validate_them_snapshot_bytes", "validate_them_snapshot_file"]

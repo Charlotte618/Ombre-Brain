@@ -219,12 +219,14 @@ class TestRenameByHuman:
     """人类唯一碰得到的东西：称呼。改完提醒模型一次。"""
 
     @pytest.mark.asyncio
-    async def test_名册只给称呼不给认识(self, tmp_path):
+    async def test_模型认识的人只给称呼不给认识(self, tmp_path):
+        """rule.md 13.3：模型自己认出来的人，人类只看得见称呼。"""
         service, _ = _enabled(tmp_path)
         await _write(service)
         名册 = service.list_people()
         assert len(名册) == 1
-        assert set(名册[0]) == {"person_id", "names", "revision"}
+        assert 名册[0]["origin"] == "model"
+        assert "claims" not in 名册[0]
         assert "直奔结论" not in json.dumps(名册, ensure_ascii=False)
 
     @pytest.mark.asyncio

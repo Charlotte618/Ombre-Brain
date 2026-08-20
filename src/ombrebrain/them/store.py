@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import tempfile
 import threading
 from typing import Any
 
@@ -28,6 +29,92 @@ from .models import Person, ThemClaim
 
 class ThemStoreError(RuntimeError):
     pass
+
+
+def validate_them_snapshot_file(path: str | os.PathLike[str]) -> None:
+    """恢复一份 them 快照之前，先确认它确实是一份 them 库。
+
+    与 `validate_you_snapshot_file` 同一套做法：只读打开、`quick_check`、
+    把 schema 逐个对上，再把每条记录反序列化一遍并核对 scope。
+
+    严格到「表和索引必须恰好是这几个」，是因为这条路径的输入来自
+    备份文件与 GitHub 仓库——那是外部内容。一份带额外表或触发器的
+    SQLite 文件放进 vault，就等于让别人往这台实例里塞了一段可执行的东西。
+    """
+    snapshot = Path(path)
+    if not snapshot.is_file() or snapshot.stat().st_size <= 0:
+        raise ThemStoreError("them snapshot is empty")
+    try:
+        connection = sqlite3.connect(
+            f"file:{snapshot.as_posix()}?mode=ro", uri=True, timeout=30
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("PRAGMA trusted_schema=OFF")
+        check = connection.execute("PRAGMA quick_check").fetchone()
+        if not check or str(check[0]).lower() != "ok":
+            raise ThemStoreError("them snapshot integrity check failed")
+        objects = connection.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+        tables = {row["name"] for row in objects if row["type"] == "table"}
+        indexes = {row["name"] for row in objects if row["type"] == "index"}
+        others = [row for row in objects if row["type"] not in {"table", "index"}]
+        if (
+            tables != {"module_state", "persons", "claims"}
+            or indexes != {"persons_scope", "claims_person_concept"}
+            or others
+        ):
+            raise ThemStoreError("them snapshot schema is not allowed")
+
+        state_rows = connection.execute(
+            "SELECT enabled, scope_json, state_revision FROM module_state"
+        ).fetchall()
+        if len(state_rows) != 1:
+            raise ThemStoreError("them snapshot state is invalid")
+        row = state_rows[0]
+        if row["enabled"] not in (0, 1) or int(row["state_revision"]) < 1:
+            raise ThemStoreError("them snapshot state is invalid")
+        scope_data = json.loads(row["scope_json"])
+        if not isinstance(scope_data, dict):
+            raise ThemStoreError("them snapshot scope is invalid")
+        scope = Scope.from_dict(scope_data)
+
+        for person_row in connection.execute(
+            "SELECT scope_key, payload_json FROM persons"
+        ):
+            Person.from_dict(json.loads(person_row["payload_json"]))
+            if person_row["scope_key"] != scope.key:
+                raise ThemStoreError("them snapshot person scope mismatch")
+        for claim_row in connection.execute(
+            "SELECT scope_key, payload_json FROM claims"
+        ):
+            claim = ThemClaim.from_dict(json.loads(claim_row["payload_json"]))
+            if claim_row["scope_key"] != scope.key or claim.scope != scope:
+                raise ThemStoreError("them snapshot claim scope mismatch")
+    except ThemStoreError:
+        raise
+    except (OSError, sqlite3.Error, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ThemStoreError("them snapshot is invalid") from exc
+    finally:
+        if "connection" in locals():
+            connection.close()
+
+
+def validate_them_snapshot_bytes(data: bytes) -> None:
+    if not data:
+        raise ThemStoreError("them snapshot is empty")
+    descriptor, temp_path = tempfile.mkstemp(prefix="ombre-them-validate-", suffix=".db")
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        validate_them_snapshot_file(temp_path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
 
 _SCHEMA = """
