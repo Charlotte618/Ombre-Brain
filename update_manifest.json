@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "f00e319c0e949ee5c3a5440d0ba6b0b7748a3c8a59cf4ad4e99af75c406accea",
-      "size": 552235
+      "sha256": "19bb5327f8c85a922ce0182d9d097fd5deae3fc164e50f38346e3d9c0aade608",
+      "size": 559656
     },
     {
       "path": "frontend/favicon.svg",
@@ -767,8 +767,8 @@
     },
     {
       "path": "src/ombrebrain/them/service.py",
-      "sha256": "b50155b800885bc8802f11238af3d3862f0595bd8c0ebbd743ac86c48a30b22f",
-      "size": 42384
+      "sha256": "06587df5d7f9a6db69031b3f8bdcc7d2cc43294dde6160a9e9ab1d7e73f94083",
+      "size": 43776
     },
     {
       "path": "src/ombrebrain/them/store.py",

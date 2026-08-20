@@ -442,6 +442,39 @@ class TestPersons:
         assert set(person.names) == {"Zoey", "阿 Z"}
 
     @pytest.mark.asyncio
+    async def test_跨类同名不自动合并(self, tmp_path):
+        """「听别人描述一个人」和「自己认识一个人」是两码事。
+
+        人类登记的那个「Zoey」模型一次都没见过，关于她的一切都是转述；
+        模型在别处遇到的「Zoey」是第一手的。按名字字符串把两者并成一个人，
+        就是在制造张冠李戴——而且并完之后来源标记还是「听你说的」，
+        人类看到会以为那是自己说过的话。
+
+        真机试出来的：登记一个同事「张三」，模型在技术分享会遇到另一个张三，
+        两个人合成了一个。
+        """
+        service, _ = _enabled(tmp_path)
+        service.add_person(["Zoey"])          # 人类说起过的那个
+        with pytest.raises(ValueError, match="同一个人吗"):
+            await _write(service)             # 模型自己遇到的那个
+
+    @pytest.mark.asyncio
+    async def test_认下来就带person_id写(self, tmp_path):
+        """挡下来不是不让写，是让模型自己判断。认，就带 id 再来一次。"""
+        service, _ = _enabled(tmp_path)
+        人 = service.add_person(["Zoey"])
+        claim, _ = await _write(service, names=[], person_id=人.id)
+        assert claim.person_id == 人.id
+
+    @pytest.mark.asyncio
+    async def test_同为它自己遇到的人照常并称呼(self, tmp_path):
+        """这一档没有混淆风险：两次都是第一手的印象。"""
+        service, _ = _enabled(tmp_path)
+        first, _ = await _write(service, names=["Zoey"])
+        again, _ = await _write(service, names=["Zoey", "小 Z"])
+        assert again.person_id == first.person_id
+
+    @pytest.mark.asyncio
     async def test_没给名字写不进去(self, tmp_path):
         service, _ = _enabled(tmp_path)
         with pytest.raises(ValueError, match="至少给一个名字"):

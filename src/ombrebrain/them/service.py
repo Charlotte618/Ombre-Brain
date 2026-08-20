@@ -151,16 +151,36 @@ class ThemService:
             raise ValueError("要写关于谁的认识，至少给一个名字（names）。")
         for name in cleaned:
             existing = self.store.find_person_by_name(scope, name)
-            if existing is not None:
-                # 命中已有的人：把这次带来的新称呼并进去，下次换个叫法也认得出。
-                merged = list(dict.fromkeys([*existing.names, *cleaned]))
-                if merged != list(existing.names):
-                    return self.store.put_person(
-                        scope,
-                        replace(existing, names=tuple(merged)),
-                        expected_revision=existing.revision,
-                    )
-                return existing
+            if existing is None:
+                continue
+            if existing.human_visible:
+                # **跨类同名不自动合并。**
+                #
+                # 「听别人描述一个人」和「自己认识一个人」是两码事。人类登记的
+                # 那个「张三」，模型一次都没见过，关于他的一切都是转述；
+                # 模型在别处遇到的「张三」是第一手的。系统按名字字符串把两者
+                # 并成一个人，就是在制造张冠李戴——而且并完之后来源标记还是
+                # 「听你说的」，人类看到会以为那是自己说过的话。
+                #
+                # 是不是同一个人，是判断，不是字符串比对。所以这里只挡下来，
+                # 把那个人摆出来，让模型自己决定：认，就带 person_id 再写一次；
+                # 不认，就换一个能区分的称呼。
+                raise ValueError(
+                    f"「{name}」这个称呼，人类登记过一个同名的人"
+                    f"（person_id={existing.id}，登记的称呼：{'、'.join(existing.names)}）。"
+                    "他和你要写的是同一个人吗？\n"
+                    f"是 → 带上 person_id=\"{existing.id}\" 再写一次。\n"
+                    "不是 → 换一个能区分的称呼，别让两个人共用一个名字。"
+                )
+            # 同为它自己遇到的人：把这次带来的新称呼并进去，下次换个叫法也认得出。
+            merged = list(dict.fromkeys([*existing.names, *cleaned]))
+            if merged != list(existing.names):
+                return self.store.put_person(
+                    scope,
+                    replace(existing, names=tuple(merged)),
+                    expected_revision=existing.revision,
+                )
+            return existing
         return self.store.put_person(scope, Person.new(cleaned))
 
     def _touch_person(self, scope: Scope, person: Person) -> Person:
