@@ -42,25 +42,29 @@ MIN_SUPPORTING_BUCKETS = 2
 def _bucket_still_counts(bucket: Mapping[str, Any] | None) -> bool:
     """这个桶还能不能撑着一条认识。
 
-    工具描述和 rule.md 13.2 写的是「被**归档或删除**，这条认识会自动失效」，
-    所以两种都要认，而它们在 `bucket_mgr` 里的落地方式并不一样：
+    只认**删除**，不认归档。
 
-    - 软删除（`delete()`）盖 `deleted_at` 并移进 archive/，`get()` 直接返回
-      None——这一半本来就成立
-    - 归档（`archive()`）**只把 type 改成 archived**，不盖 `deleted_at`，
-      `get()` 照样把桶还回来——这一半原本是假的
+    这两件事看着像，落地方式也不一样（软删除盖 `deleted_at` 并移进 archive/，
+    归档只把 type 改成 archived），但真正的分界不在实现，在语义：
 
-    只判 `is not None` 会漏掉归档那一半。这里与 `_build_edges` 的
-    `_IGNORED_BUCKET_TYPES` 对齐：归档桶不能作为新依据，也就不该继续当旧依据。
+    - 删除是有人决定不要它了 → 证据没了，认识跟着失效
+    - 归档多半是**自动衰减**的结果 → 只改变可见性（rule.md 第 9 条），
+      原文还在，证据链接与审计能力都还在（SPEC 9.3）
+
+    我一度把归档也算成失效，理由是 `Them` 的工具描述写着「被归档或删除」。
+    那是改反了方向：自动衰减归档是常态，让它触发失效等于**一条攒了三天才立住
+    的认识，会因为某个依据自然淡出而被时间清空**——和「立得那么难」的设计意图
+    直接冲突。工具描述那句话本身才是该改的。
+
+    归档同时带 `deleted_at` 的，按删除处理——`bucket_mgr.get()` 对这种桶直接
+    返回 None，这里连判都不用判。
     """
     if not isinstance(bucket, Mapping):
         return False
     metadata = bucket.get("metadata")
     if not isinstance(metadata, Mapping):
         return True
-    if metadata.get("deleted_at") or metadata.get("tombstone"):
-        return False
-    return str(metadata.get("type") or "").strip().lower() != "archived"
+    return not (metadata.get("deleted_at") or metadata.get("tombstone"))
 
 
 async def partition_by_live_evidence(

@@ -306,12 +306,11 @@ async def test_读桶抖动不会误杀(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_归档的依据也不再撑得住(tmp_path, monkeypatch):
-    """这条以前是假的。
+async def test_归档的依据仍然撑得住(tmp_path, monkeypatch):
+    """归档只改变可见性，不使证据失效（rule.md 第 9 条、SPEC 9.3）。
 
-    `archive()` 只把 type 改成 archived，不盖 deleted_at，`get()` 照样把桶
-    还回来——只判 `is not None` 会漏掉归档那一半，而工具描述和 rule.md 13.2
-    写的是「被归档**或**删除，这条认识会自动失效」。
+    自动衰减归档是常态。让它触发失效，等于一条攒了三个自然日才立住的认识
+    会因为某个依据自然淡出而被时间清空——和「立得那么难」的设计意图冲突。
     """
     service, manager = _enabled(tmp_path)
     await _formalized(service, monkeypatch)
@@ -319,4 +318,4 @@ async def test_归档的依据也不再撑得住(tmp_path, monkeypatch):
     归档了["metadata"] = {**归档了["metadata"], "type": "archived"}
     manager.buckets["memory-1"] = 归档了
 
-    assert await service.recall(query="称呼") == ""
+    assert "Lin" in await service.recall(query="称呼")

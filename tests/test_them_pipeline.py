@@ -542,18 +542,26 @@ class TestDelete:
         assert await service.recall(query="Zoey") == ""
 
     @pytest.mark.asyncio
-    async def test_归档的桶也不再撑得住(self, tmp_path):
-        """这条以前是假的。
+    async def test_归档的桶仍然撑得住(self, tmp_path):
+        """归档只改变可见性，不使证据失效（rule.md 第 9 条、SPEC 9.3）。
 
-        `archive()` 只把 type 改成 archived，不盖 deleted_at，`get()` 照样把桶
-        还回来——只判 `is not None` 会漏掉归档那一半，而工具描述和 rule.md
-        写的是「被归档**或**删除，这条认识会自动失效」。
+        我一度把归档也算成失效，理由是工具描述写着「被归档或删除」。
+        那是改反了方向：自动衰减归档是常态，让它触发失效等于一条攒了三天
+        才立住的认识会因为某个依据自然淡出而被时间清空。
         """
         service, manager = _enabled(tmp_path)
         await TestRecall()._formalized(service)
         归档了 = dict(manager.buckets["memory-1"])
         归档了["metadata"] = {**归档了["metadata"], "type": "archived"}
         manager.buckets["memory-1"] = 归档了
+        assert "结论" in await service.recall(query="Zoey")
+
+    @pytest.mark.asyncio
+    async def test_归档但带删除墓碑的按删除处理(self, tmp_path):
+        """SPEC 9.3：若归档同时带有 deleted_at，则按删除源记忆处理。"""
+        service, manager = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        manager.buckets["memory-1"] = None  # get() 对带墓碑的桶就是返回 None
         assert await service.recall(query="Zoey") == ""
 
     @pytest.mark.asyncio
