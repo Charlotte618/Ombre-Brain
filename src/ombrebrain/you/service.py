@@ -39,6 +39,30 @@ REQUIRED_CONFIRMATIONS = 3
 MIN_SUPPORTING_BUCKETS = 2
 
 
+def _bucket_still_counts(bucket: Mapping[str, Any] | None) -> bool:
+    """这个桶还能不能撑着一条认识。
+
+    工具描述和 rule.md 13.2 写的是「被**归档或删除**，这条认识会自动失效」，
+    所以两种都要认，而它们在 `bucket_mgr` 里的落地方式并不一样：
+
+    - 软删除（`delete()`）盖 `deleted_at` 并移进 archive/，`get()` 直接返回
+      None——这一半本来就成立
+    - 归档（`archive()`）**只把 type 改成 archived**，不盖 `deleted_at`，
+      `get()` 照样把桶还回来——这一半原本是假的
+
+    只判 `is not None` 会漏掉归档那一半。这里与 `_build_edges` 的
+    `_IGNORED_BUCKET_TYPES` 对齐：归档桶不能作为新依据，也就不该继续当旧依据。
+    """
+    if not isinstance(bucket, Mapping):
+        return False
+    metadata = bucket.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return True
+    if metadata.get("deleted_at") or metadata.get("tombstone"):
+        return False
+    return str(metadata.get("type") or "").strip().lower() != "archived"
+
+
 async def partition_by_live_evidence(
     bucket_mgr: Any,
     claims: list,
@@ -79,7 +103,9 @@ async def partition_by_live_evidence(
                 continue
             if edge.bucket_id not in seen:
                 try:
-                    seen[edge.bucket_id] = await bucket_mgr.get(edge.bucket_id) is not None
+                    seen[edge.bucket_id] = _bucket_still_counts(
+                        await bucket_mgr.get(edge.bucket_id)
+                    )
                 except Exception:
                     # 读不到桶不等于桶没了（可能是磁盘一时不可用）。
                     # 这种时候按「还在」处理：宁可多返回一条，也不要因为一次

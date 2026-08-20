@@ -67,7 +67,13 @@ def normalize_name(value: object) -> str:
 
 @dataclass(frozen=True)
 class Person:
-    """一个被记住的人。名字是它的内部字段，而且是多值的。"""
+    """一个被记住的人。名字是它的内部字段，而且是多值的。
+
+    `pending_rename` 是人类在前端改过称呼之后留下的一张待读回执：
+    下次浮现时告诉模型一次「你当时记的是 A，现在登记的是 B」，读完就清。
+    存的是**改动前的名字**——只说新名字的话，模型对不上自己写在认识正文里的
+    那个旧称呼，提醒就等于没提。
+    """
 
     id: str
     names: tuple[str, ...]
@@ -75,6 +81,8 @@ class Person:
     last_active: str = field(default_factory=utc_now)
     created_at: str = field(default_factory=utc_now)
     revision: int = 1
+    pending_rename: tuple[str, ...] = ()
+    renamed_at: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", require_id(self.id, "person"))
@@ -100,6 +108,13 @@ class Person:
             object.__setattr__(self, field_name, parsed)
         object.__setattr__(self, "last_active", require_text(self.last_active, "last_active", limit=80))
         object.__setattr__(self, "created_at", require_text(self.created_at, "created_at", limit=80))
+        previous: list[str] = []
+        for item in self.pending_rename or ():
+            name = str(item or "").strip()
+            if name and len(name) <= MAX_NAME_CHARS and name not in previous:
+                previous.append(name)
+        object.__setattr__(self, "pending_rename", tuple(previous[:MAX_NAMES]))
+        object.__setattr__(self, "renamed_at", str(self.renamed_at or ""))
 
     @classmethod
     def new(cls, names: list[str] | tuple[str, ...]) -> "Person":
@@ -141,6 +156,24 @@ class Person:
             "last_active": self.last_active,
         }
 
+    def renamed_to(self, names: list[str] | tuple[str, ...]) -> "Person":
+        """人类改了称呼。记下改动前的名字，留给下次浮现提醒模型一次。
+
+        只改称呼，不动 `activation_count` 与 `last_active`：人类整理名册不是
+        「这个人被提起了」，把它算成一次提及会凭空抬高衰减权重，让一个久不
+        出现的人因为被改了个名字就挤进前三。
+        """
+        return replace(
+            self,
+            names=tuple(names),
+            pending_rename=self.names,
+            renamed_at=utc_now(),
+        )
+
+    def rename_notice_read(self) -> "Person":
+        """提醒过了就清掉。这张回执只读一次，不是每次浮现都念一遍。"""
+        return replace(self, pending_rename=(), renamed_at="")
+
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Person":
         return cls(
@@ -150,6 +183,8 @@ class Person:
             last_active=value.get("last_active", "") or utc_now(),
             created_at=value.get("created_at", "") or utc_now(),
             revision=value.get("revision", 1),
+            pending_rename=tuple(value.get("pending_rename") or ()),
+            renamed_at=value.get("renamed_at", "") or "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,6 +196,8 @@ class Person:
             "last_active": self.last_active,
             "created_at": self.created_at,
             "revision": self.revision,
+            "pending_rename": list(self.pending_rename),
+            "renamed_at": self.renamed_at,
         }
 
 

@@ -171,6 +171,136 @@ class TestGates:
             await _write(service, concept_key="one_too_many", content="再多一条")
 
 
+class TestNameInBucket:
+    """poluz 2026-08-20：每个依据桶的正文里都必须出现这个人的名字。
+
+    要论证关于 Zoey 的事，每一条依据都该提到 Zoey——否则「关于这个人的认识」
+    和「碰巧同时发生的别的事」就没有区别，凑出两个出处也太容易了。
+    """
+
+    @pytest.mark.asyncio
+    async def test_桶里没这个人名就写不进去(self, tmp_path):
+        service, manager = _enabled(tmp_path)
+        manager.buckets["memory-2"] = _bucket("memory-2", "她又一次直接给了结论。")
+        with pytest.raises(ValueError, match="正文里没有出现"):
+            await _write(service)
+
+    @pytest.mark.asyncio
+    async def test_定的是每个桶都要有不是至少一个(self, tmp_path):
+        """严在这里是有意的：一条依据自己都指不明白是谁，就不该拿来撑判断。"""
+        service, manager = _enabled(tmp_path, buckets=3)
+        manager.buckets["memory-3"] = _bucket("memory-3", "他后来又提了一次。")
+        with pytest.raises(ValueError, match="memory-3"):
+            await _write(service, bucket_ids=["memory-1", "memory-2", "memory-3"])
+
+    @pytest.mark.asyncio
+    async def test_昵称命中也算(self, tmp_path):
+        service, manager = _enabled(tmp_path)
+        manager.buckets["memory-2"] = _bucket("memory-2", "小 Z 又一次直接给了结论。")
+        claim, _ = await _write(service, names=["Zoey", "小 Z"])
+        assert claim.independent_support_count == 2
+
+    @pytest.mark.asyncio
+    async def test_大小写不影响命中(self, tmp_path):
+        service, manager = _enabled(tmp_path)
+        manager.buckets["memory-2"] = _bucket("memory-2", "ZOEY said it again.")
+        claim, _ = await _write(service)
+        assert claim.independent_support_count == 2
+
+    @pytest.mark.asyncio
+    async def test_双链里的名字也算(self, tmp_path):
+        service, manager = _enabled(tmp_path)
+        manager.buckets["memory-2"] = _bucket("memory-2", "和 [[Zoey]] 又聊了一次。")
+        claim, _ = await _write(service)
+        assert claim.independent_support_count == 2
+
+
+class TestRenameByHuman:
+    """人类唯一碰得到的东西：称呼。改完提醒模型一次。"""
+
+    @pytest.mark.asyncio
+    async def test_名册只给称呼不给认识(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        名册 = service.list_people()
+        assert len(名册) == 1
+        assert set(名册[0]) == {"person_id", "names", "revision"}
+        assert "直奔结论" not in json.dumps(名册, ensure_ascii=False)
+
+    @pytest.mark.asyncio
+    async def test_改名之后下次浮现提醒一次(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "Zoey")
+        service.rename_person(person.id, ["Zoey Chen", "小 Z"])
+
+        第一次 = await service.recall(query="Zoey Chen")
+        assert "信息变迁" in 第一次
+        assert "Zoey" in 第一次 and "Zoey Chen" in 第一次  # 新旧对照都给
+
+        第二次 = await service.recall(query="Zoey Chen")
+        assert "信息变迁" not in 第二次  # 只念一次
+
+    @pytest.mark.asyncio
+    async def test_提醒不看命中(self, tmp_path):
+        """久不被提起的人改了名，提醒也得出来；挂在命中上可能几个月都不出现。"""
+        service, _ = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "Zoey")
+        service.rename_person(person.id, ["Zoey Chen"])
+
+        输出 = await service.recall(query="今天天气不错")
+        assert "信息变迁" in 输出
+
+    @pytest.mark.asyncio
+    async def test_改名不算一次提及(self, tmp_path):
+        """人类整理名册不是「这个人被提起了」，算成提及会凭空抬高衰减权重。"""
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "Zoey")
+        改后 = service.rename_person(person.id, ["Zoey Chen"])
+        assert 改后.activation_count == person.activation_count
+        assert 改后.last_active == person.last_active
+
+    @pytest.mark.asyncio
+    async def test_认识正文一个字都不动(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service)
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "Zoey")
+        service.rename_person(person.id, ["Zoey Chen"])
+        after = service.store.get_claim(scope, claim.id)
+        assert after.content == claim.content
+
+    @pytest.mark.asyncio
+    async def test_称呼撞车被拒(self, tmp_path):
+        """两个人共用一个名字，姓名命中会同时把两份认识都拉出来。"""
+        service, manager = _enabled(tmp_path, buckets=4)
+        manager.buckets["memory-3"] = _bucket("memory-3", "阿哲说了同样的话。")
+        manager.buckets["memory-4"] = _bucket("memory-4", "阿哲又说了一次。")
+        await _write(service)
+        await _write(
+            service, names=["阿哲"], bucket_ids=["memory-3", "memory-4"],
+            concept_key="other_style", content="他讲话也很直接",
+        )
+        scope = service.status().scope
+        阿哲 = service.store.find_person_by_name(scope, "阿哲")
+        with pytest.raises(ValueError, match="已经用了其中一个称呼"):
+            service.rename_person(阿哲.id, ["Zoey"])
+
+    @pytest.mark.asyncio
+    async def test_不能把称呼清空(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "Zoey")
+        with pytest.raises(ValueError, match="至少要留一个称呼"):
+            service.rename_person(person.id, [])
+
+
 class TestNoRelationships:
     """rule.md 13.3：只记这个人本身，不描述任何关系。"""
 
@@ -400,6 +530,29 @@ class TestDelete:
             )
         del manager.buckets["memory-1"]  # 还剩两个，仍然过门槛
         assert "直奔结论" in await service.recall(query="Zoey")
+
+    @pytest.mark.asyncio
+    async def test_软删除的桶不再撑得住(self, tmp_path):
+        """软删除盖 deleted_at，bucket_mgr.get 对它返回 None。"""
+        service, manager = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        manager.buckets["memory-1"] = None  # get() 对软删除桶就是返回 None
+        assert await service.recall(query="Zoey") == ""
+
+    @pytest.mark.asyncio
+    async def test_归档的桶也不再撑得住(self, tmp_path):
+        """这条以前是假的。
+
+        `archive()` 只把 type 改成 archived，不盖 deleted_at，`get()` 照样把桶
+        还回来——只判 `is not None` 会漏掉归档那一半，而工具描述和 rule.md
+        写的是「被归档**或**删除，这条认识会自动失效」。
+        """
+        service, manager = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        归档了 = dict(manager.buckets["memory-1"])
+        归档了["metadata"] = {**归档了["metadata"], "type": "archived"}
+        manager.buckets["memory-1"] = 归档了
+        assert await service.recall(query="Zoey") == ""
 
     @pytest.mark.asyncio
     async def test_读桶抖动不会误杀(self, tmp_path):

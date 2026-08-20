@@ -167,6 +167,94 @@ class ThemService:
             # 并发下有人先改了这个人：提及计数少记一次而已，不该让读路径失败。
             return person
 
+    # --- 人类唯一能碰的那一处：称呼 ---
+
+    def list_people(self) -> list[dict[str, Any]]:
+        """给前端看的名册。**只有称呼，没有任何一条认识。**
+
+        rule.md 13.3 的口子只开到这里：人类看得见、也只改得动这个人叫什么。
+        认识本身、依据、历史一概不出现——那是模型的，不是给人读的。
+        """
+        try:
+            scope = self._require_scope()
+        except ThemStoreError:
+            return []
+        return [
+            {
+                "person_id": person.id,
+                "names": list(person.names),
+                "revision": person.revision,
+            }
+            for person in self.store.list_persons(scope)
+        ]
+
+    def rename_person(
+        self, person_id: str, names: list[str], *, expected_revision: int | None = None
+    ) -> Person:
+        """人类改这个人的正名与昵称。
+
+        改完留一张待读回执，下次浮现时告诉模型一次。**不动任何一条认识的正文**：
+        那些句子是模型自己写的，人类改的是名册上的称呼，不是模型的判断。
+        正文里留着的旧称呼，由模型看到提醒之后自己决定要不要改。
+        """
+        scope = self._require_scope()
+        person = self.store.get_person(scope, str(person_id or "").strip())
+        if person is None:
+            raise ValueError(f"没有这个人：{person_id}")
+        cleaned = list(
+            dict.fromkeys(str(name or "").strip() for name in names or [] if str(name or "").strip())
+        )
+        if not cleaned:
+            raise ValueError("至少要留一个称呼。")
+        if cleaned == list(person.names):
+            return person
+        conflict = next(
+            (
+                other
+                for name in cleaned
+                for other in [self.store.find_person_by_name(scope, name)]
+                if other is not None and other.id != person.id
+            ),
+            None,
+        )
+        if conflict is not None:
+            raise ValueError(
+                f"「{conflict.display_name}」已经用了其中一个称呼。"
+                "两个人共用一个名字的话，姓名命中会同时把两份认识都拉出来。"
+            )
+        return self.store.put_person(
+            scope,
+            person.renamed_to(cleaned),
+            expected_revision=(
+                person.revision if expected_revision is None else expected_revision
+            ),
+        )
+
+    def _take_rename_notices(self, scope: Scope, persons: list[Person]) -> list[str]:
+        """把这些人身上的待读回执取出来，并当场清掉。
+
+        只读一次：清掉之前先写回库，写失败就不返回这一条——宁可漏一次提醒，
+        也不要每次浮现都念同一句。
+        """
+        notices: list[str] = []
+        for person in persons:
+            if not person.pending_rename:
+                continue
+            旧 = "、".join(person.pending_rename)
+            新 = "、".join(person.names)
+            try:
+                self.store.put_person(
+                    scope, person.rename_notice_read(), expected_revision=person.revision
+                )
+            except ThemStoreError:
+                continue
+            notices.append(
+                f"你当时记的是「{旧}」，现在登记的称呼是「{新}」。"
+                "这只是称呼变了，你对他的认识没有被动过；"
+                "认识正文里如果还写着旧称呼，要不要改由你自己定。"
+            )
+        return notices
+
     def _person_score(self, person: Person) -> float:
         try:
             return float(self.decay_engine.calculate_score(person.decay_metadata()))
@@ -193,7 +281,9 @@ class ThemService:
         scope = self._require_scope()
         person = self._resolve_person(scope, names or [], person_id)
 
-        edges, protected_texts = await self._build_edges(bucket_ids, basis=basis)
+        edges, protected_texts = await self._build_edges(
+            bucket_ids, basis=basis, person=person
+        )
         normalized = self._validate(
             aspect=aspect,
             concept_key=concept_key,
@@ -264,9 +354,19 @@ class ThemService:
         }
 
     async def _build_edges(
-        self, bucket_ids: list[str], *, basis: str
+        self, bucket_ids: list[str], *, basis: str, person: Person
     ) -> tuple[tuple[EvidenceEdge, ...], list[str]]:
         """闸二：把模型给的 bucket_id 校验成显式关系，顺带收集要防泄漏的原文。
+
+        比 `you` 多守一条：**每个依据桶的正文里都必须出现这个人的名字**
+        （正名或任一昵称，命中一个就算）。要论证关于 Zoey 的事，每一条依据都
+        该提到 Zoey——否则「关于这个人的认识」和「碰巧同时发生的别的事」
+        就没有区别，凑出两个出处也太容易了。
+
+        poluz 2026-08-20 定的是**每个桶都要有**，不是「至少一个」。代价是真实
+        记忆里常见的「第一条写名字、第二条用代词承接」会被拒；那种情况得去找
+        写了名字的那条桶。严在这里是有意的：一条依据自己都指不明白是谁，
+        就不该拿来撑一条关于谁的判断。
 
         校验不过就抛，不降级不兜底——一条没有真实记忆撑着的认识，宁可写不进去。
         """
@@ -296,6 +396,14 @@ class ThemService:
             body = str(bucket.get("content") or "").strip()
             if not body:
                 raise ValueError(f"{bucket_id} 没有正文，不能作为依据。")
+            folded = body.casefold()
+            if not any(name in folded for name in person.name_keys):
+                raise ValueError(
+                    f"{bucket_id} 的正文里没有出现{person.display_name}"
+                    f"（登记的称呼：{'、'.join(person.names)}）。"
+                    "关于一个人的认识，每一条依据都得指明是谁——"
+                    "换一条写了名字的记忆，或者先把这个称呼补进 names。"
+                )
             source_id = ""
             for link in source_links_from_metadata(metadata):
                 if str(link.get("status") or "active") != "active":
@@ -497,12 +605,20 @@ class ThemService:
         persons = self.store.list_persons(scope)
         if not persons:
             return ""
+        # 称呼变迁的提醒**不看命中**：人类改了名字，下次浮现就该说一次，
+        # 哪怕这次的 query 跟那个人毫无关系。挂在命中上的话，一个久不被提起的
+        # 人改了名，这条提醒可能几个月都出不来——那时再说已经没有意义了。
+        notices = self._take_rename_notices(scope, persons)
+
         matched = self._match_persons(query, persons) if query else self._top_persons(persons)
-        if not matched:
-            return ""
         for person in matched:
             self._touch_person(scope, person)
-        return await self._render(scope, matched, max_results=max_results)
+        块 = await self._render(scope, matched, max_results=max_results) if matched else ""
+
+        if not notices:
+            return 块
+        提醒 = "[信息变迁：有人在前端改了称呼。]\n" + "\n".join(f"- {n}" for n in notices)
+        return f"{提醒}\n\n{块}" if 块 else 提醒
 
     async def surface(self, *, query: str = "") -> str:
         """给 breath / dream 用的追加块。

@@ -11,7 +11,7 @@ import json
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from ombrebrain.them import ThemService, ThemStore, ThemStoreError, ThemToolGate
+from ombrebrain.them import Person, ThemService, ThemStore, ThemStoreError, ThemToolGate
 from tools import _runtime as tools_runtime
 from tools.them import dispatch
 from web import them as them_web
@@ -191,3 +191,67 @@ class TestQuota:
             "enabled": True, "state_revision": 0, "scope": "谁的"
         }))
         assert r.status_code == 400
+
+
+class TestPeopleRoutes:
+    """人类唯一看得见、改得动的东西：称呼。"""
+
+    async def _person(self, service, tmp_path):
+        service.set_enabled(True)
+        scope = service.status().scope
+        return service.store.put_person(scope, Person.new(["Zoey", "小 Z"]))
+
+    @pytest.mark.asyncio
+    async def test_名册只给称呼(self, tmp_path, monkeypatch):
+        service, _, route_mcp = _wire(tmp_path, monkeypatch)
+        person = await self._person(service, tmp_path)
+        resp = await route_mcp.routes[("GET", "/api/them/people")](JsonRequest())
+        people = json.loads(resp.body)["people"]
+        assert people == [
+            {"person_id": person.id, "names": ["Zoey", "小 Z"], "revision": person.revision}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_改名走乐观并发(self, tmp_path, monkeypatch):
+        service, _, route_mcp = _wire(tmp_path, monkeypatch)
+        person = await self._person(service, tmp_path)
+        post = route_mcp.routes[("POST", "/api/them/people")]
+
+        ok = await post(JsonRequest({
+            "person_id": person.id, "names": ["Zoey Chen"], "revision": person.revision
+        }))
+        assert ok.status_code == 200
+        assert json.loads(ok.body)["names"] == ["Zoey Chen"]
+
+        stale = await post(JsonRequest({
+            "person_id": person.id, "names": ["别的"], "revision": person.revision
+        }))
+        assert stale.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_关闭时改不动(self, tmp_path, monkeypatch):
+        service, _, route_mcp = _wire(tmp_path, monkeypatch)
+        person = await self._person(service, tmp_path)
+        state = service.status()
+        service.set_enabled(False, expected_revision=state.state_revision)
+        resp = await route_mcp.routes[("POST", "/api/them/people")](JsonRequest({
+            "person_id": person.id, "names": ["Zoey Chen"], "revision": person.revision
+        }))
+        assert resp.status_code == 503
+        名册 = await route_mcp.routes[("GET", "/api/them/people")](JsonRequest())
+        assert json.loads(名册.body)["people"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("坏body", [
+        {"person_id": "person_" + "0" * 32, "names": ["x"]},
+        {"person_id": 1, "names": ["x"], "revision": 1},
+        {"person_id": "p", "names": "x", "revision": 1},
+        {"person_id": "p", "names": [1], "revision": 1},
+        {"person_id": "p", "names": ["x"], "revision": True},
+        {"person_id": "p", "names": ["x"], "revision": 1, "多的": 1},
+    ])
+    async def test_参数格式被守住(self, tmp_path, monkeypatch, 坏body):
+        service, _, route_mcp = _wire(tmp_path, monkeypatch)
+        await self._person(service, tmp_path)
+        resp = await route_mcp.routes[("POST", "/api/them/people")](JsonRequest(坏body))
+        assert resp.status_code == 400

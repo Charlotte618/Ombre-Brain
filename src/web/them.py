@@ -172,3 +172,73 @@ def register(mcp) -> None:
                     )
 
         return JSONResponse(response_payload(), headers={"Cache-Control": "no-store"})
+
+    @mcp.custom_route("/api/them/people", methods=["GET"])
+    async def list_them_people(request: Request) -> Response:
+        """名册：**只有称呼，没有任何一条认识。**
+
+        rule.md 13.3 的口子只开到这里。认识本身、依据、历史一概不出这个接口——
+        那是模型的，不是给人读的。
+        """
+        error = sh._require_auth(request)
+        if error:
+            return error
+        return JSONResponse(
+            {"people": sh.them_service.list_people()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @mcp.custom_route("/api/them/people", methods=["POST"])
+    async def rename_them_person(request: Request) -> Response:
+        """改一个人的正名与昵称。人类唯一改得动的东西。
+
+        改完模型会在下次浮现时被提醒一次，认识正文一个字都不动——
+        那些句子是模型写的，人类改的是名册上的称呼，不是模型的判断。
+        """
+        error = sh._require_auth(request)
+        if error:
+            return error
+        try:
+            body = await sh._read_json_object(request)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "无效 JSON"}, status_code=400)
+        if set(body) != {"person_id", "names", "revision"}:
+            return JSONResponse(
+                {"error": "只接受 person_id、names 和 revision"}, status_code=400
+            )
+        person_id = body.get("person_id")
+        names = body.get("names")
+        revision = body.get("revision")
+        if (
+            not isinstance(person_id, str)
+            or not isinstance(names, list)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or not all(isinstance(name, str) for name in names)
+        ):
+            return JSONResponse({"error": "参数格式无效"}, status_code=400)
+
+        try:
+            person = sh.them_service.rename_person(
+                person_id, names, expected_revision=revision
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except ThemStoreError as exc:
+            status = 409 if "revision conflict" in str(exc) else 503
+            return JSONResponse(
+                {
+                    "error": "这个人的资料已经变过了，请刷新后重试"
+                    if status == 409
+                    else "them 暂时不可用"
+                },
+                status_code=status,
+            )
+        return JSONResponse(
+            {
+                "person_id": person.id,
+                "names": list(person.names),
+                "revision": person.revision,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
