@@ -39,6 +39,58 @@ REQUIRED_CONFIRMATIONS = 3
 MIN_SUPPORTING_BUCKETS = 2
 
 
+async def partition_by_live_evidence(
+    bucket_mgr: Any,
+    claims: list,
+    *,
+    min_buckets: int = MIN_SUPPORTING_BUCKETS,
+) -> tuple[list, list]:
+    """按依据桶是否还在，把认识分成「还站得住」和「该失效」两堆。
+
+    ## 为什么改成读时校验
+
+    闸二有两半：立的时候要两个出处，依据塌下去之后也不能继续算数——
+    立的时候要求两个出处、塌到一个之后还继续生效，等于门槛只在入口处存在。
+
+    后半段原先挂在 `bucket_mgr` 的桶变动观察者上，由 `observe_bucket_change`
+    把失效工作入队。3.4.x 拿掉 LLM 那轮把 `observe_bucket_change` 和 outbox
+    一起删了，**但没接替代路径**——于是 `_remove_bucket_evidence` 变成了死代码，
+    而「依据被归档或删除，这条认识会自动失效」还写在工具描述、rule.md 和
+    SPEC 里。功能表里写了没实现的东西，这是要修的那种缺陷。
+
+    没有把观察者接回来，是因为那条路要求 observer 同步、只做持久化入队
+    （见 `attach_bucket_change_observer` 的 docstring）——那就得把刚拆掉的
+    队列重新装回去。改成读时校验不需要队列，语义也更准：
+    失效判断发生在**要用它的时候**，而不是桶变动的那一刻。
+
+    代价是每次读回多几次桶查询。控制在可接受范围的办法是只校验**将要返回的**
+    那几条：配额限制了每份认识的条数，一次校验通常只查两三个桶，
+    而且同一个桶在一次调用里只查一次。
+
+    `bucket_mgr.get` 对软删除的桶返回 None，正好是这里要的语义。
+    """
+    live: list = []
+    dead: list = []
+    seen: dict[str, bool] = {}
+    for claim in claims:
+        supporting: set[str] = set()
+        for edge in claim.evidence:
+            if edge.stance != "supports":
+                continue
+            if edge.bucket_id not in seen:
+                try:
+                    seen[edge.bucket_id] = await bucket_mgr.get(edge.bucket_id) is not None
+                except Exception:
+                    # 读不到桶不等于桶没了（可能是磁盘一时不可用）。
+                    # 这种时候按「还在」处理：宁可多返回一条，也不要因为一次
+                    # 读取抖动就把一条攒了三天的认识判死。
+                    seen[edge.bucket_id] = True
+            if seen[edge.bucket_id]:
+                supporting.add(edge.bucket_id)
+        (live if len(supporting) >= min_buckets else dead).append(claim)
+    return live, dead
+
+
 class YouService:
     """You 的开关、写入把关与安全召回。
 
@@ -474,11 +526,13 @@ class YouService:
         if query:
             candidates = [claim for claim in candidates if self._query_score(claim, query) > 0]
 
+        candidates = await self._drop_unsupported(candidates[:result_limit])
+
         # 这里原本还要再过一层 LLM（abstract_you_hint），把已经成立的认识磨成
         # "概念词组 + 关系词"再交出去。删掉了：模型自己写下的判断，没有理由让
         # 另一个模型改写一遍才还给它。正文直接返回。
         lines = ["[你自己写下的、关于对方的长期认识；不是此刻的事实，按需自行判断]"]
-        for claim in candidates[:result_limit]:
+        for claim in candidates:
             if contains_forbidden_subject(claim.content):
                 continue
             next_line = "- " + claim.content
@@ -486,6 +540,31 @@ class YouService:
                 break
             lines.append(next_line)
         return "\n".join(lines) if len(lines) > 1 else ""
+
+    async def _drop_unsupported(self, claims: list[YouClaim]) -> list[YouClaim]:
+        """依据已经塌掉的，当场失效并从这次返回里拿掉。
+
+        闸二的后半段（见 `partition_by_live_evidence`）。失效状态写回库里，
+        所以只查这一次——下次这条已经是 expired，`callable_only` 直接把它挡在外面。
+        """
+        live, dead = await partition_by_live_evidence(self.bucket_mgr, claims)
+        now = utc_now()
+        for claim in dead:
+            try:
+                self.store.put_claim(
+                    replace(
+                        claim,
+                        lifecycle="expired",
+                        review_state="pending",
+                        valid_until=now,
+                        needs_recompute=False,
+                    ),
+                    expected_revision=claim.revision,
+                )
+            except YouStoreError:
+                # 并发下别处先改了这一条。这次不返回它就够了，状态下次再收。
+                self.logger.info("you claim expiry deferred: %s", claim.id)
+        return live
 
     async def delete(self, claim_id: str) -> str:
         """模型撤回自己写的一条认识。不需要三次确认。

@@ -369,6 +369,50 @@ class TestDelete:
         assert after.lifecycle == "expired"
         assert not after.callable_at()
 
+    @pytest.mark.asyncio
+    async def test_桶被删掉之后读回时当场失效(self, tmp_path):
+        """闸二的后半段，走的是读时校验而不是桶变动通知。
+
+        这条以前是坏的：`remove_bucket_evidence` 写了，但没有任何人调用它
+        （`bucket_change_observers` 从来没被注册过），而「依据被删除后这条
+        认识会自动失效」写在工具描述和 rule.md 里。功能表里写了没实现的东西。
+        """
+        service, manager = _enabled(tmp_path)
+        claim = await TestRecall()._formalized(service)
+        assert "直奔结论" in await service.recall(query="Zoey")
+
+        del manager.buckets["memory-1"]  # 依据塌到只剩一个
+
+        assert await service.recall(query="Zoey") == ""
+        after = service.store.get_claim(service.status().scope, claim.id)
+        assert after.lifecycle == "expired"
+
+    @pytest.mark.asyncio
+    async def test_只塌了一个但还够就继续生效(self, tmp_path):
+        service, manager = _enabled(tmp_path, buckets=3)
+        claim, _ = await _write(
+            service, bucket_ids=["memory-1", "memory-2", "memory-3"]
+        )
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            claim = _age_receipts(service, claim)
+            claim, _ = await _write(
+                service, bucket_ids=["memory-1", "memory-2", "memory-3"]
+            )
+        del manager.buckets["memory-1"]  # 还剩两个，仍然过门槛
+        assert "直奔结论" in await service.recall(query="Zoey")
+
+    @pytest.mark.asyncio
+    async def test_读桶抖动不会误杀(self, tmp_path):
+        """读不到桶不等于桶没了。一次磁盘抖动不该判死一条攒了三天的认识。"""
+        service, manager = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+
+        async def 炸(_bucket_id):
+            raise OSError("disk hiccup")
+
+        manager.get = 炸
+        assert "直奔结论" in await service.recall(query="Zoey")
+
 
 class TestDisabled:
     @pytest.mark.asyncio

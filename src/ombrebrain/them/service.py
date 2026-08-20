@@ -47,6 +47,8 @@ from ..you.models import (
     evidence_digest,
     utc_now,
 )
+from ..you.service import partition_by_live_evidence
+
 from .models import THEM_POLICY_VERSION, Person, ThemClaim
 from .safety import contains_forbidden_subject, leaks_protected_text
 from .store import ThemStore, ThemStoreError
@@ -500,7 +502,7 @@ class ThemService:
             return ""
         for person in matched:
             self._touch_person(scope, person)
-        return self._render(scope, matched, max_results=max_results)
+        return await self._render(scope, matched, max_results=max_results)
 
     async def surface(self, *, query: str = "") -> str:
         """给 breath / dream 用的追加块。
@@ -549,7 +551,9 @@ class ThemService:
                 matched.append(person)
         return matched
 
-    def _render(self, scope: Scope, persons: list[Person], *, max_results: int) -> str:
+    async def _render(
+        self, scope: Scope, persons: list[Person], *, max_results: int
+    ) -> str:
         """渲染成一条 JSON。
 
         用 JSON 而不是散文，是因为这些话说的全是**别人**：混在自然语言里返回，
@@ -558,9 +562,11 @@ class ThemService:
         """
         payload: list[dict[str, Any]] = []
         for person in persons:
-            claims = self.store.list_claims(
-                scope, person_id=person.id, callable_only=True
-            )[:max_results]
+            claims = await self._drop_unsupported(
+                self.store.list_claims(
+                    scope, person_id=person.id, callable_only=True
+                )[:max_results]
+            )
             notes = [
                 {"aspect": claim.aspect, "content": claim.content}
                 for claim in claims
@@ -602,6 +608,33 @@ class ThemService:
             expected_revision=claim.revision,
         )
         return f"撤回了：{claim.content}"
+
+    async def _drop_unsupported(self, claims: list[ThemClaim]) -> list[ThemClaim]:
+        """依据已经塌掉的，当场失效并从这次返回里拿掉。
+
+        闸二的后半段。实现与 you 共用（`partition_by_live_evidence`），
+        原因见那边的 docstring：桶变动观察者那条路在 3.4.x 被拆掉之后
+        一直没有替代，`remove_bucket_evidence` 也就成了只有测试在调的死代码。
+        """
+        live, dead = await partition_by_live_evidence(
+            self.bucket_mgr, claims, min_buckets=MIN_SUPPORTING_BUCKETS
+        )
+        now = utc_now()
+        for claim in dead:
+            try:
+                self.store.put_claim(
+                    replace(
+                        claim,
+                        lifecycle="expired",
+                        review_state="pending",
+                        valid_until=now,
+                        needs_recompute=False,
+                    ),
+                    expected_revision=claim.revision,
+                )
+            except ThemStoreError:
+                self.logger.info("them claim expiry deferred: %s", claim.id)
+        return live
 
     async def remove_bucket_evidence(self, bucket_id: str) -> None:
         """闸二的持续那一半：依据没了，这条认识就不再算数。

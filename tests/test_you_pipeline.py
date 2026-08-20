@@ -253,3 +253,53 @@ async def test_forbidden_subjects_and_source_copies_are_refused(tmp_path):
 async def test_thresholds_are_named_not_magic(tmp_path):
     assert REQUIRED_CONFIRMATIONS == 3
     assert MIN_SUPPORTING_BUCKETS == 2
+
+
+async def _formalized(service, monkeypatch):
+    """攒满三个不同自然日，让这条认识真正生效。"""
+    for day in (16, 17, 18):
+        _stamp(monkeypatch, day)
+        claim, _ = await _write(service)
+    return claim
+
+
+@pytest.mark.asyncio
+async def test_依据被删掉之后读回时当场失效(tmp_path, monkeypatch):
+    """闸二的后半段，走读时校验而不是桶变动通知。
+
+    这条以前是坏的：`_remove_bucket_evidence` 写了，但没有任何人调用它——
+    `bucket_change_observers` 从来没被注册过。3.4.x 拿掉 LLM 那轮删掉了
+    `observe_bucket_change` 和 outbox，没接替代路径，于是
+    「依据被归档或删除，这条认识会自动失效」在工具描述、rule.md 和 SPEC 里
+    留着，实际不成立。
+    """
+    service, manager = _enabled(tmp_path)
+    await _formalized(service, monkeypatch)
+    assert "Lin" in await service.recall(query="称呼")
+
+    del manager.buckets["memory-1"]  # 依据塌到只剩一个
+
+    assert await service.recall(query="称呼") == ""
+
+
+@pytest.mark.asyncio
+async def test_塌了一个但还够就继续生效(tmp_path, monkeypatch):
+    service, manager = _enabled(tmp_path, buckets=3)
+    for day in (16, 17, 18):
+        _stamp(monkeypatch, day)
+        await _write(service, buckets=("memory-1", "memory-2", "memory-3"))
+    del manager.buckets["memory-1"]  # 还剩两个，仍然过门槛
+    assert "Lin" in await service.recall(query="称呼")
+
+
+@pytest.mark.asyncio
+async def test_读桶抖动不会误杀(tmp_path, monkeypatch):
+    """读不到桶不等于桶没了。一次磁盘抖动不该判死一条攒了三天的认识。"""
+    service, manager = _enabled(tmp_path)
+    await _formalized(service, monkeypatch)
+
+    async def 炸(_bucket_id):
+        raise OSError("disk hiccup")
+
+    manager.get = 炸
+    assert "Lin" in await service.recall(query="称呼")
