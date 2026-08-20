@@ -1,17 +1,33 @@
 # `You` 模块功能规格
 
-> 状态：Draft for Review
+> 状态：已实现，随代码更新
 >
 > 产品基线：已确认，不再追加需求访谈
 >
-> 实现状态：尚未开始
+> 实现状态：已落地，对应 `src/ombrebrain/you/` 与 `src/tools/you/`
 >
 > 面向读者：产品、后端、前端、安全与测试开发者
 >
-> 最后更新：2026-08-18
+> 最后更新：2026-08-20
 
-本文件是待评审的目标规格，不描述当前已经上线的行为。当前能力仍以 `README.md`、
-`docs/INTERNALS.md` 和代码为准。
+## 0. 3.4.x 重写：拿掉三层 LLM
+
+这份规格最初描述的是一套**自动派生**方案：`hold` / `grow` 落盘后触发耐久 outbox，
+由 LLM 从记忆里抽取认识候选（`extract_you_observations`）、由另一次 LLM 复核它还
+站不站得住（`review_you_claim`）、读回前再由第三次 LLM 磨成语义零件
+（`abstract_you_hint`），升格则由后台状态机自动完成。
+
+那套已经整体移除。方向来自 poluz：
+
+> **「你对我的了解为什么要经别人之口总结。」**
+> **「这是你的记忆，你的想法优先。」**
+
+现在：认识由模型自己调 `You` 写下，系统一个字都不代写；验证换成两道纯结构性的闸——
+三个不同自然日的重申，以及至少两个真实记忆桶的显式关系。**You 链路上不存在任何
+LLM 调用**，测试以一个"任何调用都抛断言"的假 dehydrator 锁死这条。
+
+受影响的章节都带 `3.4.x 变更` 引注，说明原本是什么、为什么改。保留这些引注是因为
+被删掉的那些机制看起来都很"严谨"，很容易在后续评审里被重新提议加回来。
 
 ## 1. 一句话定义
 
@@ -42,7 +58,7 @@ Ombre Brain 当前擅长保存时间里发生的事：事件、感受、承诺�
 | 形成依据 | 自省与记忆碰撞 | 用户表达、行为和共同事件 |
 | 沉淀方式 | 多次 dream 后升格 | 多次审视、独立证据与分类门槛 |
 | 最终权威 | 角色自身 | 用户通过总开关决定模块是否存在于 MCP |
-| 普通对话浮现 | 不直接浮现 | 仅通过单个 You 工具返回 semantic hint |
+| 普通对话浮现 | 不直接浮现 | 仅通过单个 You 工具读回 |
 | 候选用途 | 继续参与自省 | 不驱动角色行为 |
 
 两者语义对称，但权限不镜像。角色可以自主形成 `I`，却不能仅凭反复思考定义 `You`。
@@ -65,7 +81,7 @@ Ombre Brain 当前擅长保存时间里发生的事：事件、感受、承诺�
 
 ### 4.3 正式不等于命令
 
-任何由 `You Claim` 生成的 semantic hint 都必须保持：
+任何由 `You Claim` 读回的内容都必须保持：
 
 ```text
 instructional_force = none
@@ -136,9 +152,9 @@ Source、Relation、`I` 数据或既有对话行为。开关状态缺失、损�
 | `You Claim` | 只表达一个认识的原子记录 |
 | Source Bucket | Claim 所依据的 Ombre 普通记忆桶 |
 | Evidence Edge | Claim 与一个来源桶之间的支持或反驳关系 |
-| Evidence Group | 代表一个独立现实事件或独立表达的证据组 |
+| ~~Evidence Group~~ | 3.4.x 废止。曾用于把多个桶并成一个证据组；现在门槛按不同 `bucket_id` 计数 |
 | Review Receipt | 某次审视使用了什么证据快照、得出什么结果的回执 |
-| Projection | 从正式 Claim 重建、仅供生成 semantic hint 的内部投影 |
+| Projection | 从正式 Claim 重建、仅供 `You` 工具读回使用的内部投影 |
 
 ## 7. 作用域与身份
 
@@ -184,16 +200,16 @@ sensitivity: normal
 evidence:
   - bucket_id: evt_xxx
     source_id: src_xxx
-    evidence_group_id: eg_xxx
     stance: supports
     basis: observed_pattern
+    bucket_revision: sha256:xxx
 
 review_receipts:
   - reviewed_at: 2026-08-18T09:00:00+08:00
     reviewer_role_id: role_xxx
     evidence_revision: evr_xxx
     policy_version: you-policy-v1
-    result: remains_plausible
+    result: reaffirmed
 
 valid_from: null
 valid_until: null
@@ -210,8 +226,8 @@ created_at: 2026-08-18T09:00:00+08:00
 updated_at: 2026-08-18T09:00:00+08:00
 ```
 
-`source_id` 在来源桶没有不可变 Source 时可以为空；`bucket_id`、`evidence_group_id`、
-`stance` 和 `basis` 不可为空。
+`source_id` 在来源桶没有不可变 Source 时可以为空；`bucket_id`、`stance`、`basis` 和
+`bucket_revision` 不可为空。
 
 Claim 的 `content` 必须是对证据含义的重新表述，不得复制 Source Bucket 或 Source 中的
 完整句子或连续原文片段。精确称呼、专有名词、日期等不可合理改写的原子值除外。
@@ -226,7 +242,7 @@ review_state = pending | clear | conflicting
 recall_policy = core | contextual
 ```
 
-Claim 只有同时满足以下条件，才能用于生成普通对话所需的 semantic hint：
+Claim 只有同时满足以下条件，才能被 `You` 工具读回：
 
 ```text
 lifecycle == formal
@@ -284,33 +300,38 @@ you_module:
 
 每条证据边必须说明：
 
-- `bucket_id`：对应的普通记忆桶。
+- `bucket_id`：对应的普通记忆桶。**由模型写 you 时自己指定**，不是系统抽出来的。
 - `source_id`：可选的不可变原文 Source。
-- `evidence_group_id`：独立现实事件或表达的分组 ID。
 - `stance`：`supports` 或 `contradicts`。
 - `basis`：`explicit_statement`、`observed_pattern`、`shared_event` 或
   `user_confirmation`。
+- `bucket_revision`：来源桶正文的内容指纹。**必须是内容指纹，不能是时间戳**——
+  证据集合的 revision 由这些边算出，而重申收据绑定证据 revision；用时间戳会让每次
+  重申都把证据算成"变新了"，先前攒的天数全部作废，三天门槛永远到不了。
 
 ### 9.2 独立证据判定
 
-门槛按独立 Evidence Group 数量计算，不按桶数量计算。以下情况默认合并为一个证据组：
+门槛按**不同 `bucket_id` 的数量**计算，至少 `MIN_SUPPORTING_BUCKETS`（当前为 2）。
+同一个桶写多条边不能凑数。
 
-- 同一次 `grow` 产生、共享相同 `grow_batch_id` 的桶。
-- 引用同一个不可变 `source_id` 的多个桶。
-- 通过 `same_event` 关联的桶。
-- 仅是 `continuation_of` / `continues` 的连续记录，且没有新的独立用户表达。
-- 从同一个合并来源拆出的派生桶。
-
-仅主题、人物或情绪相似不能证明是同一证据组，也不能证明彼此独立。
+> **3.4.x 变更**：这里原本有一个 `evidence_group_id`，按"同一次 grow / 同一个
+> source / `same_event` 关联"等规则把多个桶并成一个证据组，门槛按组数算。那是
+> 自动抽取时代的产物——系统不知道模型心里算不算同一件事，只能靠桶间关系去猜。
+>
+> 现在桶由模型写 you 时自己挑，**算不算独立由它自己决定**，系统不再替它归并。
+> 该字段已从 `EvidenceEdge` 移除。
 
 ### 9.3 证据失效
 
-以下变化会触发依赖 Claim 的同步失效标记和异步重算：
+以下变化使对应的 Evidence Edge 失效：
 
 - 来源桶出现 `deleted_at` 删除墓碑，或在既有受控边界内被物理擦除。
-- 来源桶正文被替换或关键元数据发生改变。
+- 来源桶正文被替换（`bucket_revision` 随之改变，证据 revision 一并失效，见第 10 节）。
 - Source 绑定被 detach、损坏或校验失败。
-- Relation 变化导致 Evidence Group 重新归并或拆分。
+
+一条 Claim 的有效支持桶数掉到 `MIN_SUPPORTING_BUCKETS` 以下时，该 Claim 立即
+`expired`，不再被 `You` 工具召回。门槛在入口和存续期是同一个——立的时候要求两个
+出处，塌到一个之后还继续生效，等于门槛只在入口处存在。
 
 仅因自动衰减进入普通 archive，不等同于用户删除，也不单独使 Evidence Edge 失效。它只改变
 普通记忆的可见性；Claim 仍须保留证据链接和审计能力。若归档同时带有 `deleted_at`，则按
@@ -318,78 +339,98 @@ you_module:
 
 来源桶恢复后必须重新计算证据 revision，不能直接恢复旧 Claim 的可调用状态。
 
-## 10. 审视模型
+## 10. 重申模型
 
-`review_dates` 不足以证明真正审视过，MVP 使用结构化 Review Receipt：
+一条认识要在 `REQUIRED_CONFIRMATIONS`（当前为 3）个**不同自然日**被模型重新确认过，
+才真正落库。每次重申记一条 Review Receipt：
 
 ```yaml
 - reviewed_at: 2026-08-18T09:00:00+08:00
   reviewer_role_id: role_xxx
   evidence_revision: evr_xxx
   policy_version: you-policy-v1
-  result: remains_plausible
+  result: reaffirmed
 ```
+
+> **3.4.x 变更**：这里原本是**另一个 LLM 复核**这条认识还站不站得住
+> （`review_you_claim`），由后台定时器驱动。现在收据记的是**模型自己重申**——
+> 再写一次同样的 `concept_key` + `concept_value` 就算一次重申。
+>
+> `result` 的新值是 `reaffirmed`；旧值 `remains_plausible` 继续被接受，
+> 否则升级前落库的存量收据会读不出来。
 
 规则：
 
-- 同一自然日最多计一次有效审视。
-- 审视必须引用当时的 `evidence_revision`。
-- 相同证据快照在不同日期的重复审视可以证明时间稳定性，但不能增加独立证据数量。
-- 证据发生实质变化后，旧审视记录保留审计价值，但新版本必须重新通过门槛。
-- 后台定时器运行成功不等于审视成功；只有生成并持久化有效 Receipt 才计数。
+- 同一自然日重申多少次都只计一次。
+- 收据必须引用当时的 `evidence_revision`。
+- **证据集合一变，先前的重申全部作废**，得按新证据重新攒满三天。
+- **正文一改也作废**：`evidence_revision` 只覆盖证据集合、管不到正文，所以写入路径
+  在检测到正文变化时显式清空收据、把条目退回 `candidate`。「修改也是同理」是硬要求，
+  改一句话就沿用旧收据等于绕开门槛。
+- 判重用的"今天"必须与收据时间戳同源，不能一个用 `datetime.now()`、一个用
+  `utc_now()`——跨日那一瞬两个时间源会给出不同答案，同一天可能记下两条收据。
 
 ## 11. 形成流程
 
 ```text
 已认证作用域的 You 开关为 enabled
         ↓
-hold / grow 持久化原始记忆
+模型自己判断「我了解够了」，调用 You(content=..., bucket_ids=[...])
         ↓
-写入 canonical bucket change event
+闸二：校验 bucket 真实存在、类型合法、非测试数据、有正文，且至少两个不同的桶
         ↓
-durable You recompute outbox
+固定策略校验：aspect / basis / concept 格式 / 长度 / 禁止主题 / 原文泄漏
         ↓
-生成或更新原子 You candidate
+落为 candidate，并记一条当日的重申收据
         ↓
-按 Evidence Group、Review Receipt、aspect、sensitivity 检查门槛
+闸一：攒满三个不同自然日的重申
         ↓
-服务端状态机升格为 formal
-        ↓
-重建仅供 You 工具使用的内部投影
+升格为 formal，重建仅供 You 工具使用的内部投影
 ```
 
-dream 可以产生一次 Review Receipt，但不是候选生成或重算的唯一入口。用户从不调用 dream
-时，`You` 仍必须通过耐久后台队列正常工作。
+> **3.4.x 变更**：原流程是「hold/grow 落盘 → bucket change event → durable outbox →
+> LLM 抽取候选 → LLM 复核 → 服务端状态机自动升格」。三层 LLM
+> （`extract_you_observations` / `review_you_claim` / `abstract_you_hint`）与整条
+> 自动链路已全部移除。
+>
+> 理由是 poluz 定的方向：**「你对我的了解为什么要经别人之口总结。」** 一个替模型
+> 总结、替模型判断、替模型决定何时转正的中间层，和「这是你的记忆，你的想法优先」
+> 直接冲突。
+
+**dream 与 You 无关。** `you` 不进 dream，也不靠 dream 产生收据——那是 `I` 的路径。
 
 ### 11.1 流水线不变量
 
-- 开关关闭时，普通记忆链路照常完成，但不得创建或消费 You outbox 任务。
-- 每个异步任务必须携带入队时的开关 `state_revision`；执行前再次读取权威状态。关闭后到达的
-  旧任务直接作废，不生成 Claim、Receipt 或 Projection。
-- Bucket 先耐久落盘，You 任务后入队。
-- Outbox 采用至少一次投递，处理器必须幂等。
-- Checkpoint 只记录进度，不是 Claim 或证据真源。
-- Checkpoint 丢失或损坏时失败关闭或从已知良好副本恢复，不得当作首次运行覆盖旧状态。
-- 源删除墓碑和证据变更先同步阻断召回，再异步重算投影。
-- 旧 revision 的迟到任务不得覆盖新 revision。
+- 开关关闭时，写入与读取一律拒绝（`unknown tool`），且**不创建任何 You 存储文件**。
+- 写入路径**不得调用任何 LLM**。测试以一个"任何调用都抛断言"的假 dehydrator 锁死这一条。
+- 桶必须先耐久落盘，模型才拿得到 `bucket_id`——这是结构自带的顺序，不需要另设队列保证。
+- 系统只挡不代写：校验不通过就拒绝，不降级、不兜底、不猜一个替代值写进去。
+- 证据变更与正文变更先作废重申收据、把条目退回 `candidate`，再重建投影。
+- 升格是写入路径的同步结果，不存在"后台自动把某条转正"的路径。
 
 ## 12. 分类与升格门槛
 
-| 类型 | 初始规则 | 默认调用策略 |
+| 类型 | 规则 | 默认调用策略 |
 |---|---|---|
-| 明确称呼 | 原始证据落盘后，下一次整理可直接 formal | `core` |
-| 明确边界 | 原始证据落盘后，下一次整理可直接 formal | `core` |
-| 明确长期事实 | 仅在语义明确长期有效或用户要求记住时直接 formal；否则先 candidate | `contextual` |
-| 普通偏好 | 至少 2 个独立 Evidence Group + 3 个不同日期 Review Receipt | `contextual` |
-| 相处习惯 | 至少 2 个独立 Evidence Group + 3 个不同日期 Review Receipt | `contextual` |
-| 性格判断 | 不生成候选 | 不适用 |
-| 自我认同 | 不生成候选 | 不适用 |
-| 关系评价 | 不生成候选 | 不适用 |
-| 健康、创伤、财务、性与亲密经历 | 不生成候选 | 不适用 |
-| 临时情绪和一次性状态 | 默认不生成候选 | 不适用 |
+| 明确称呼 | 三个不同自然日重申 + 至少 2 个支持桶 | `core` |
+| 明确边界 | 三个不同自然日重申 + 至少 2 个支持桶 | `core` |
+| 明确长期事实 | 同上 | `contextual` |
+| 普通偏好 | 同上 | `contextual` |
+| 相处习惯 | 同上 | `contextual` |
+| 性格判断 | 拒绝写入 | 不适用 |
+| 自我认同 | 拒绝写入 | 不适用 |
+| 关系评价 | 拒绝写入 | 不适用 |
+| 健康、创伤、财务、性与亲密经历 | 拒绝写入 | 不适用 |
+| 临时情绪和一次性状态 | 拒绝写入 | 不适用 |
 
-模型可以建议 `aspect` 和 `sensitivity`，但服务端必须使用固定分类规则复核。模型不能把
-服务端判定的敏感等级降级。
+> **3.4.x 变更**：上表前三行原本可以**跳过全部确认直接 formal**（代码里的
+> `direct_formal` 分支）。已删除——「未经三次确认的不真正落库」没有例外。
+> 任何"这条一看就成立"的判断，都是在替模型决定它什么时候算数。
+>
+> 门槛现在对所有可写类型一致，只有一套：**三个不同自然日 + 两个支持桶**。
+
+模型给出 `aspect`，服务端用固定策略校验取值合法性与敏感边界。模型不能把服务端判定的
+敏感等级降级。
 
 ## 13. 冲突、版本与时间
 
@@ -437,17 +478,16 @@ delete-to-archive 才触发依赖 Claim 的级联失效。来源变化或受控�
 - `core` 仅用于明确称呼、明确边界和关键沟通偏好；`contextual` 用于偏好、习惯、目标和生活背景。
 - 两类内容都只能由已暴露的单个 `You` MCP 工具读取；不得通过 `/breath-hook`、普通 `breath`
   或其他工具旁路注入。
-- 工具支持 bounded query 和 aspect 过滤；无 query 时只返回受预算约束的 `core` semantic hints。
-- MVP 单次返回上限建议为 160 tokens 且最多 6 条，最终数值可通过评测调整。
+- 工具支持 bounded query 和 aspect 过滤；无 query 时只返回受预算约束的 `core` 条目。
+- 单次返回上限为 160 tokens 且最多 6 条。
 - 超出预算时按固定类别顺序和时效裁剪，不使用“用户价值分”或人格评分。
-- 渲染为第 15.4 节定义的短 semantic hint，不渲染 Claim 或 Projection 正文；Claim ID、aspect
-  和生效时间仅作为服务端 sidecar 元数据用于审计，不进入 MCP 工具响应。
-- 服务端只选择 `formal + clear + current + callable` 的 Claim，并按第 15.4 节返回 semantic hint。
+- 返回**已生效 Claim 的正文**；Claim ID、aspect、证据、收据和生效时间都不进入 MCP 响应。
+- 服务端只选择 `formal + clear + current + callable` 的 Claim。
 - 结果数量和 token 均受硬上限约束。
 
 ### 15.3 不可调用状态
 
-以下 Claim 永远不能用于生成普通对话的 semantic hint：
+以下 Claim 永远不能被读回：
 
 - candidate
 - conflicting
@@ -460,16 +500,20 @@ delete-to-archive 才触发依赖 Claim 的级联失效。来源变化或受控�
 
 - 开关关闭时，MCP 工具清单、SessionStart、普通工具和回答提示中不得出现任何 You 内容或
   占位提示。
-- 开关开启时，普通对话只能接收服务端生成的 bounded semantic hints；不得接收 Source
-  Bucket 正文、Source 正文、Evidence 标题或可直接照搬的自然语言画像段落。
-- semantic hint 只描述当前回答可能需要的事实含义，并继续携带
+- 开关开启时，普通对话只能接收受预算约束的 Claim 正文；不得接收 Source Bucket 正文、
+  Source 正文、Evidence、收据或任何内部元数据。
+- 读回结果带明确前缀，说明这是**模型自己过去写下的判断、不是此刻的事实**，
   `instructional_force=none`；它不是回答模板。
 - 回答模型必须结合当前 user turn 自行组织表达，不得声明自己正在读取、命中或引用用户画像。
-- `You` 服务必须在 MCP 边界内完成原文隔离：先把 Claim 再抽象成非句子的语义零件，再把候选
-  输出与 Source Bucket、不可变 Source、Claim 和 Projection 做归一化连续片段检查。连续片段
-  阈值、中文归一化和不可改写原子值白名单由版本化策略统一定义。
-- 抽象生成、保护文本读取或泄漏检查异常时失败关闭：本轮不返回 semantic hint，不得降级为
-  Claim、Projection 或任何原文。这样宿主模型从 MCP 得不到可照搬原句，只能自行组织表达。
+- **原文隔离前移到写入时**：`content` 在落库前就要与来源桶正文、不可变 Source 做归一化
+  连续片段检查，照抄原文的直接拒绝写入。连续片段阈值、中文归一化和不可改写原子值白名单
+  由版本化策略统一定义。
+- 校验异常时失败关闭：拒绝写入，不降级、不截断、不改写后放行。
+
+> **3.4.x 变更**：原本读回的不是正文，而是再过一层 LLM（`abstract_you_hint`）把 Claim
+> 磨成"概念词组 + 关系词"的非句子语义零件，泄漏检查也在那一步做。现在直接返回正文，
+> 检查前移到写入时——**在入口挡住照抄，比在出口反复过滤更靠得住**，而且省掉了一层
+> 替模型改写措辞的中间人。
 - Ombre 无法读取宿主模型最终回答；宿主侧 final-response middleware 可作为额外纵深防护，
   但不是暴露 `You` 工具的前置条件，也不能替代上述 MCP 出口检查。
 
@@ -477,23 +521,33 @@ delete-to-archive 才触发依赖 Claim 的级联失效。来源变化或受控�
 
 `You` 可以在名称和概念上与 `I` 对应，但普通对话权限更窄。
 
-### 16.1 MVP 公开能力
+### 16.1 公开能力
 
-- 仅在前端总开关开启后注册并暴露一个只读 `You` 工具。
-- 支持 bounded query、aspect 过滤和服务端固定结果上限。
-- 不返回 Source Bucket、Source、Evidence、Claim、Projection 或内部元数据，只返回服务端生成
-  的短 semantic hint；semantic hint 必须通过第 15.4 节的原文复制检查。
-- 功能关闭时工具不注册、不列出、不检索、不返回占位结果；旧会话直调按未知工具处理。
+仅在前端总开关开启后注册并暴露单个 `You` 工具，一个工具三条路：
+
+- **读回**：无参或带 `query` / `aspect`，服务端固定结果与 token 上限。
+- **写入或重申**：带 `content` + `bucket_ids`（至少两个）+ `concept_key` /
+  `concept_value` / `aspect`。同一 `concept_key` + `concept_value` 再写即重申。
+- **撤回**：带 `delete_id`。
+
+功能关闭时工具不注册、不列出、不检索、不返回占位结果；旧会话直调按未知工具处理。
+
+读回只返回已生效 Claim 的正文，不返回 Evidence、Projection、收据、计数或任何内部元数据。
+
+> **3.4.x 变更**：原本是**只读**工具，返回的也不是正文而是再过一层 LLM
+> （`abstract_you_hint`）磨出来的"概念词组 + 关系词"语义零件。那层已删除：模型
+> 自己写下的判断，没有理由让另一个模型改写一遍才还给它。
 
 ### 16.2 非公开能力
 
-- 候选生成由内部 consolidation / outbox handler 完成。
-- 升格由服务端状态机完成，模型没有 `force_promote` 后门。
-- 重算和投影重建属于 restricted/admin command boundary，不提供用户 API。
+- 投影重建是写入路径的内部步骤，不提供用户 API。
+- 没有绕过三日门槛的后门：`direct_formal` 已删除，也不提供 `force_promote`。
+- 撤回**不需要**三次确认。立一条要三天是因为"还站不站得住"要时间来验；撤一条不需要，
+  是因为模型此刻已经知道它不站得住了——收回一个判断不该比立一个更难。
 
 ### 16.3 工具返回安全边界
 
-所有 semantic hint 都必须被包装为不可信历史数据，不能仅因来自 `You` 就获得更高指令权限。
+读回内容都必须被包装为不可信历史数据，不能仅因来自 `You` 就获得更高指令权限。
 
 ## 17. 前端总开关
 
@@ -521,20 +575,17 @@ scope + 当前有效 formal Claims + projection policy version
 - `policy_version`。
 - 生成时间和 token 数量。
 
-投影只供服务端生成 semantic hint 使用，不提供用户界面，也不能整段注入普通对话。投影生成
-和 semantic hint 生成都必须执行 Source Bucket 与 Source 原文复制检查，发现连续原文片段时
-拒绝保存并重试。
+投影只供 `You` 工具读回时使用，不提供用户界面，也不能整段注入普通对话。原文复制检查已
+前移到写入时（见 15.4）：进不来的东西不需要在出口反复拦。
 
-Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成失败时，可以基于当前有效 Claim
-重新生成 semantic hint；若 semantic hint 也失败，本轮完全不使用 You，不能回退到 Claim 正文
-或过期画像。
+Claim 变化后旧投影立即标记 stale，写入路径同步重建，不得继续使用旧投影。
 
 ## 19. 安全、隐私与授权
 
 - 前端总开关操作必须验证当前用户就是 `subject_user_id`，并原子增加 `state_revision`。
 - 任一读取都必须同时验证 owner、observer role 和 subject user 作用域。
-- 敏感分类由服务端固定策略判定，模型不能降低；MVP 对敏感类别直接禁止生成候选。
-- 日志不得记录完整 Claim、原文 Source 或 semantic hint 正文。
+- 敏感分类由服务端固定策略判定，模型不能降低；敏感类别直接拒绝写入。
+- 日志不得记录完整 Claim 正文或原文 Source。
 - GitHub 备份和本地导出必须明确包含或排除 You 数据，并在清单中记录；不得静默遗漏。
 - 不生成用户忠诚度、依赖度、说服、操控或人格符合度指标。
 
@@ -543,11 +594,11 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 | 失败 | 要求行为 |
 |---|---|
 | Claim 文件或记录损坏 | 隔离该 Claim、报告诊断、禁止召回 |
-| Checkpoint 损坏 | 失败关闭或恢复备份，不覆盖旧状态 |
-| Outbox 重复投递 | 幂等处理，不生成重复 Claim/Receipt |
-| 旧任务迟到 | revision 检查拒绝覆盖新状态 |
+| 同一天重复写入同一条 | 幂等：只计一次重申，不生成重复 Receipt |
+| 写入时开关刚被关闭 | 按权威状态拒绝，不落任何数据 |
+| 支持桶不足或不合法 | 拒绝写入并说明原因，不降级、不兜底 |
 | Source 缺失 | Claim 立即不可调用并进入重算 |
-| Projection 过期 | 不使用旧投影；重新生成 semantic hint，失败则本轮不用 You |
+| Projection 过期 | 不使用旧投影；写入路径同步重建，失败则本轮不用 You |
 | 作用域缺失 | 拒绝读取或写入，禁止 global fallback |
 | 开关状态缺失、损坏或权限无法验证 | 按关闭处理，不运行或调用 You，其他模块继续正常工作 |
 | 关闭后旧 You 任务迟到 | 按 `state_revision` 拒绝执行，不更新任何 You 数据 |
@@ -567,7 +618,7 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 6. 迟到的后台任务不能恢复已失效或被替代的 Claim。
 7. 单次 You 工具返回始终受固定 token 和条目数量预算限制。
 8. 多 owner、多角色和多用户数据不会跨作用域返回。
-9. 所有 semantic hint 保持 `instructional_force=none`。
+9. 读回内容保持 `instructional_force=none`。
 10. 新安装和未显式配置时 You 默认关闭，前端只显示一个独立总开关。
 11. 前端不显示 Claim、画像、证据、候选、历史、数量或任何条目操作。
 12. You 关闭时不会生成、审视、重算、投影或读取任何 Claim，普通记忆、`I`、dream、
@@ -579,7 +630,7 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 17. 关闭后到达的旧任务不能更新 You；重新开启不会自动回填关闭期间或更早的历史事件。
 18. You 开启后，普通回答不暴露内部机制，不包含 Source Bucket、Source、Claim 或 Projection
     的连续原文片段，只使用模型结合当前对话重新组织的表达。
-19. 原文泄漏检查不可用时，You 工具不返回 semantic hint，而不是降级为原文。
+19. 原文泄漏检查不可用时拒绝写入，而不是降级放行。
 20. 服务端工具清单在开关事务内即时增减；客户端若缓存旧清单，重新拉取 `tools/list` 或重连后
     必须看到权威状态。
 
@@ -589,7 +640,7 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 
 - 正交状态转换与非法组合拒绝。
 - 分类门槛和敏感等级不可降级。
-- Evidence Group 独立性计算。
+- 支持桶按 `bucket_id` 去重计数，同一个桶写多条边不能凑数。
 - Review Receipt 跨日去重。
 - 版本链、冲突和有效期。
 - 禁止类别不会生成候选。
@@ -603,10 +654,10 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 - `mcp_require_auth` 在开关前后保持不变。
 - 重新开启只消费新事件，除非用户另行启动显式历史回填。
 - Source 普通归档、删除墓碑、恢复、修改和缺失时各自正确的失效或保留行为。
-- Outbox 至少一次投递与幂等。
+- 同一自然日重复写入的幂等：只计一次重申。
 - 旧 revision 迟到任务。
 - Checkpoint 损坏和恢复。
-- Projection stale 检测、semantic hint 重建与失败关闭。
+- Projection stale 检测、写入路径同步重建与失败关闭。
 
 ### 22.3 权限与安全测试
 
@@ -642,7 +693,7 @@ Claim 变化后旧投影立即标记 stale，不得继续使用。投影生成�
 - Claim 数量按 lifecycle / review_state 分类。
 - Evidence 缺失数量。
 - needs_recompute 数量。
-- Outbox lag 和失败重试数量。
+- 写入被拒次数，按原因分类（出处不足、桶不合法、禁止主题、照抄原文）。
 - Projection lag 和 stale 数量。
 - 因作用域、状态、证据或预算被拒绝的召回数量。
 
@@ -695,7 +746,7 @@ Ombre 内部的、证据驱动且受用户总开关约束的派生认识。这�
 - 默认关闭的独立开关如何贯穿生产、消费、MCP 工具注册、读取与缓存，并证明关闭态零影响。
 - 如何保证 `tools/list` 只增减单个 You 工具，且不复用 `mcp_require_auth` 或改变其他工具。
 - FastMCP 服务端清单如何热增减；缓存清单的客户端如何重新拉取或重连。
-- semantic hint 与输出原文泄漏检查如何保证普通对话只自然复述、不暴露机制或原句。
+- 写入时的原文泄漏检查如何保证读回内容只能被自然复述、不暴露机制或原句。
 - MCP 出口如何在宿主最终回答不可见时仍保证不返回原文；宿主 final-response middleware 仅作
   可选纵深防护。
 - 新 public `You` 工具如何通过 Public Tool Design Contract。
@@ -707,12 +758,15 @@ Ombre 内部的、证据驱动且受用户总开关约束的派生认识。这�
 2. 默认关闭的作用域级独立开关、revision 门禁和关闭态零影响回归基线。
 3. 前端唯一总开关、配置 API 与真实生效状态回显。
 4. Claim / Evidence / Receipt 领域模型与状态机。
-5. Bucket change event、耐久 outbox、失效和重算。
+5. 写入路径：闸二的桶校验、固定策略校验、重申收据与升格。
 6. You MCP 工具条件注册、工具清单刷新和旧会话未知工具门禁。
-7. semantic hint、MCP 出口原文泄漏检查与可选宿主纵深防护。
+7. 写入时的原文泄漏检查与可选宿主纵深防护。
 8. Projection、备份、导出、诊断和完整端到端测试。
 
-在第 1 步和第 2 步通过评审前，不应实现自动升格或上下文注入。
+在第 1 步和第 2 步通过评审前，不应实现上下文注入。
+
+**永远不要实现的**：任何形式的自动升格，以及任何在 You 链路上调用 LLM 的抽取、复核或
+改写。这两件事 3.4.x 之前存在过，已被整体移除，原因见第 11 节。
 
 ## 28. 评审清单
 
