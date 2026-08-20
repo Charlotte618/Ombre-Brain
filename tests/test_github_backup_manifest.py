@@ -716,3 +716,40 @@ def test_restore_destination_rejects_symlink_parent(tmp_path):
 
     with pytest.raises(RuntimeError, match="symbolic link"):
         GitHubSync._assert_safe_restore_destination(str(base), "linked/escape.md")
+
+
+def test_每个恢复标记都必须有人消费():
+    """`github_sync` 每返回一个 `<模块>_restored`，web 层就必须把对应的工具门同步回去。
+
+    这条守的是一个真实漏过的形状：3.5.0 给 GitHub 同步接 them 时，
+    `github_sync` 里 `result["them_restored"] = True` 写了，
+    `web/github.py` 那一侧却只处理 `you_restored`——磁盘上的开关已经恢复，
+    当前进程的工具清单还停在旧状态，要重启才对得上。
+
+    生产端本来就有测试（见上面 `you_restored is True` 那条），
+    漏的是消费端，所以这里断言的是两侧的对称性：
+    以后再加第四个模块，忘了接消费端同样会红。
+    """
+    import re
+    from pathlib import Path
+
+    repo = Path(__file__).parents[1]
+    produced = set(
+        re.findall(
+            r'result\["(\w+)_restored"\]\s*=\s*True',
+            (repo / "src" / "github_sync.py").read_text(encoding="utf-8"),
+        )
+    )
+    assert produced, "没在 github_sync.py 里找到任何恢复标记，正则该更新了"
+
+    web = (repo / "src" / "web" / "github.py").read_text(encoding="utf-8")
+    漏掉的 = [
+        模块
+        for 模块 in sorted(produced)
+        if f'result.pop("{模块}_restored"' not in web
+        or f"{模块}_tool_gate.sync" not in web
+    ]
+    assert not 漏掉的, (
+        f"{漏掉的} 的恢复标记没人消费：github_sync 返回了它，"
+        "但 web/github.py 没有据此同步工具门，恢复后要重启才生效。"
+    )

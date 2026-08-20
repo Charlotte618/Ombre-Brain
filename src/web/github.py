@@ -314,6 +314,29 @@ def register(mcp) -> None:
                         pass
                     result["ok"] = False
                     result["error"] = "恢复后的 You 开关未能生效，已按关闭处理"
+            # them 与 you 同构，同样要在恢复后把工具门对回磁盘上的状态。
+            # 少了这一段，`github_sync` 明明返回了 `them_restored`，却没有任何人消费：
+            # 磁盘上的开关已经变了，当前进程的工具清单还停在旧状态，要重启才对得上。
+            if result.pop("them_restored", False):
+                try:
+                    state = sh.them_service.status()
+                    sh.them_tool_gate.sync(state.enabled)
+                except Exception:
+                    state = sh.them_service.status()
+                    if state.enabled:
+                        try:
+                            sh.them_service.set_enabled(
+                                False,
+                                expected_revision=state.state_revision,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        sh.them_tool_gate.sync(False)
+                    except Exception:
+                        pass
+                    result["ok"] = False
+                    result["error"] = "恢复后的 them 开关未能生效，已按关闭处理"
             result["pre_import_backup"] = backup
             # 3) 让 bucket_mgr 的 BM25 索引失效（导入直写磁盘，绕过了 bucket_mgr 的脏标记）
             try:
