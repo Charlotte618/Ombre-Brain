@@ -711,6 +711,11 @@
       "size": 67
     },
     {
+      "path": "src/ombrebrain/storage/attribution.py",
+      "sha256": "214a36223fcd435316a7a67e4f923b4b9ee90ac5caa848948f8bb5b0819fccd6",
+      "size": 12452
+    },
+    {
       "path": "src/ombrebrain/storage/backup_archive.py",
       "sha256": "0afac3429d2103cc98a2bf8228ffcec4285f1eaf8f86f864c365acd62e3919f2",
       "size": 35181
@@ -727,8 +732,8 @@
     },
     {
       "path": "src/ombrebrain/storage/quote_store.py",
-      "sha256": "36bf0fd499fb0ccca530d95409db09471a02c463fd4ce9ae84d00d07f47d5dfb",
-      "size": 5789
+      "sha256": "e7e9f3a51a1ba12716961748829d73c2551ba6ff1b305979640118767df611a8",
+      "size": 7046
     },
     {
       "path": "src/ombrebrain/storage/relation_store.py",
@@ -792,8 +797,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "b169b1e84567d313eda7a2745451c2c7563c2bdab47551a2db5286c06527c157",
-      "size": 70099
+      "sha256": "c50ca7463a4c6d1ce9ba65fbbab2a384f8728567d22ab6a735883ce6bf86dbde",
+      "size": 70438
     },
     {
       "path": "src/server_app.py",
@@ -837,8 +842,8 @@
     },
     {
       "path": "src/tools/breath/_verbatim.py",
-      "sha256": "c07d7282864a5ec4fe91fc0a9325de5b14a78b5b5978159c0184fcb663e5c597",
-      "size": 2136
+      "sha256": "47a1fec7412a7b1a48ea675f4ad1b1711f2f97b92aae10cc79d7ee7b2d066ced",
+      "size": 3039
     },
     {
       "path": "src/tools/breath/catalog.py",
@@ -857,8 +862,8 @@
     },
     {
       "path": "src/tools/breath/search.py",
-      "sha256": "2e96648a77934ace80731c2438526f2f7ef5fd523d18fdc82296367299efca8d",
-      "size": 19615
+      "sha256": "fabf07d413a9e7e14960c2dae46c9503f1e646a9b086e8d8e9730ac1d07b0e86",
+      "size": 19735
     },
     {
       "path": "src/tools/breath/surface.py",
@@ -887,8 +892,8 @@
     },
     {
       "path": "src/tools/dream/output.py",
-      "sha256": "0f28353e341e54145757fb6ecd11587ac745f1a9bb31334e2326a1ddc7722f95",
-      "size": 22919
+      "sha256": "93f4fc2f1f8a3ee63fc8b6eba1a0c09a708ccf8eba539cfd6f4dcc37d8097796",
+      "size": 23874
     },
     {
       "path": "src/tools/grow/__init__.py",
@@ -957,8 +962,8 @@
     },
     {
       "path": "src/tools/trace/_quote_edit.py",
-      "sha256": "50a0189cc2f797f1891d00dc0d4b1b253ce6facde89b08d9a98cced0b673d79f",
-      "size": 4909
+      "sha256": "4c5196f0a91f78262a33fd3fe1e0692523cf35600d495b499b1b5ddca2d58bc9",
+      "size": 5044
     },
     {
       "path": "src/tools/trace/_relation_edit.py",

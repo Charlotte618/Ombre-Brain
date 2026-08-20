@@ -31,6 +31,7 @@ frontmatter。但只给了写入口，没给修正口——记错了、写错字
 
 from __future__ import annotations
 
+from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 
 from .. import _runtime as rt
@@ -99,4 +100,5 @@ async def apply(bucket_id: str, quotes_replace: list) -> str:
     )
     removed = len(existing) - len(stored)
     suffix = f"（删掉了 {removed} 条）" if removed > 0 else ""
-    return f"已更新 {bucket_id} 的引语{suffix}：\n{render_quotes(stored)}"
+    rendered = render_quotes(stored, **names_from_config(getattr(rt, "config", None)))
+    return f"已更新 {bucket_id} 的引语{suffix}：\n{rendered}"

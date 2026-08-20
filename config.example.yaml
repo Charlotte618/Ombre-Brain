@@ -212,6 +212,18 @@ limits:
   max_pinned: 20                  # max pinned buckets; 0 disables check
   max_protected: 20               # protected 桶上限；0 关闭检查
 
+# --- Speech attribution / 发言归属 ---
+# 记忆正文里写成 `名字：内容` 的行，如果那个名字既不是我、也不是用户，
+# 就会被移出正文、单独返回成一条 JSON（带 speaker），免得容易幻觉的模型
+# 把第三方说的话读成用户说的。
+# 内置称呼表已覆盖「我/助手/assistant/claude…」和「你/用户/user…」；
+# 这里补的是这台部署才知道的叫法——用户的名字、昵称、你这一侧的自称。
+# 补不全的后果是保守的：没登记的用户别名会被当第三方拆出来，
+# 拆出来的块里写明了归属，不会反过来变成「用户说过」。
+attribution:
+  self_names: []                  # 我这一侧的自称，如 ["小夜", "ombre"]
+  user_names: []                  # 用户的称呼，如 ["她", "poluz"]
+
 # --- iter 1.9 G: 桶类型默认值 / per-type frontmatter defaults ---
 # Applied at create() time only when caller doesn't pass that field.
 # 写入时若调用方未显式传入对应字段，使用此处默认值。

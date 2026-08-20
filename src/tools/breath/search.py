@@ -34,6 +34,7 @@ from datetime import datetime, time
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
+from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 from ._verbatim import render_stored_bucket
 from utils import count_tokens_approx, parse_bool, parse_iso_datetime
@@ -397,7 +398,10 @@ async def surface_search(
         # 只有我在这次调用里明确说了「我想知道当时是怎么说的」，它才出现。
         # 附加之后必须重算 token：预算是按实际返回的字数算的，不是按正文。
         if with_quotes:
-            quote_block = render_quotes(quotes_from_metadata(meta))
+            quote_block = render_quotes(
+                quotes_from_metadata(meta),
+                **names_from_config(getattr(rt, "config", None)),
+            )
             if quote_block:
                 rendered = f"{rendered}\n{quote_block}"
                 entry_tokens = count_tokens_approx(rendered)
