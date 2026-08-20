@@ -227,6 +227,35 @@ class TestQuotes:
         assert "non_user_speech" not in rendered
 
 
+class TestRenderOnly:
+    """拆分只发生在渲染层：不动磁盘，也不动召回。
+
+    这是这次改动最该守住的边界。被拆走的那句话仍然完整躺在 `bucket["content"]`
+    里，BM25 与向量索引读的都是它——所以一条普通记忆的召回分数不会因为
+    第三方分块而变化。
+
+    真机侧已经验过同一件事：只出现在第三方发言里的词
+    （「先看结论」「过程回头再说」）照样能被 breath_search 检索到。
+    这里锁住单测这一半，免得哪天有人把拆分挪进写入路径。
+    """
+
+    def test_桶本身一个字都不改(self):
+        from tools.breath._verbatim import render_stored_bucket
+
+        bucket = {
+            "id": "b1",
+            "content": "今天开会。\nZoey：先看结论，过程回头再说。",
+            "metadata": {"type": "dynamic", "quotes": [{"text": "x", "speaker": "Zoey"}]},
+        }
+        原文 = bucket["content"]
+        rendered, _ = render_stored_bucket(bucket, "[bucket_id:b1]")
+        # 展示正文里第三方那句已经移走
+        assert "先看结论" not in rendered.split("```json")[0]
+        # 但桶本身没被动过——索引读的是这一份
+        assert bucket["content"] == 原文
+        assert "先看结论" in bucket["content"]
+
+
 class TestConfig:
     def test_没有配置段时返回空表(self):
         assert names_from_config(None) == {"self_names": [], "user_names": []}
