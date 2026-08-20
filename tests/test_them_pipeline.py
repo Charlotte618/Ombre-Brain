@@ -508,6 +508,35 @@ class TestRecall:
         assert payload["them"][0]["person"] == "Zoey"
 
     @pytest.mark.asyncio
+    async def test_自己遇到的人标成第一手(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await self._formalized(service)
+        payload = json.loads(
+            (await service.recall(query="Zoey")).split("```json")[1].split("```")[0]
+        )
+        assert payload["them"][0]["known_via"] == "met_myself"
+
+    @pytest.mark.asyncio
+    async def test_听人类说起的人标成转述(self, tmp_path):
+        """模型读回时得分得清自己见没见过这个人。
+
+        人类那一侧靠名册的分组看得见，模型这一侧只有这个字段。缺了它，
+        「我认识的张三」和「用户跟我讲过的张三」在读回时长得一模一样——
+        而后者本该带着一层「可能记岔、也可能是另一个同名的人」的不确定。
+        """
+        service, _ = _enabled(tmp_path)
+        人 = service.add_person(["Zoey"])
+        claim, _ = await _write(service, names=[], person_id=人.id)
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            _age_receipts(service, claim)
+            claim, _ = await _write(service, names=[], person_id=人.id)
+        payload = json.loads(
+            (await service.recall(query="Zoey")).split("```json")[1].split("```")[0]
+        )
+        assert payload["them"][0]["known_via"] == "heard_from_user"
+        assert "never met" in payload["known_via_note"]
+
+    @pytest.mark.asyncio
     async def test_没提到名字就不返回(self, tmp_path):
         service, _ = _enabled(tmp_path)
         await self._formalized(service)

@@ -881,13 +881,30 @@ class ThemService:
                 if not contains_forbidden_subject(claim.content)
             ]
             if notes:
-                payload.append({"person": person.display_name, "notes": notes})
+                payload.append(
+                    {
+                        "person": person.display_name,
+                        # 「听人类描述过的人」和「我自己遇到过的人」是两种认识，
+                        # 混起来就是张冠李戴。人类那一侧靠名册的分组看得见，
+                        # 模型这一侧得靠这个字段——否则它读回时无从分辨自己
+                        # 到底见没见过这个人，而这恰恰是最该谨慎的那一档。
+                        "known_via": (
+                            "heard_from_user" if person.human_visible else "met_myself"
+                        ),
+                        "notes": notes,
+                    }
+                )
         if not payload:
             return ""
         encoded = json.dumps(
             {
                 "them": payload,
                 "attribution_note": "about other people; not the user, not me",
+                "known_via_note": (
+                    "heard_from_user = I have never met this person; everything here "
+                    "came from the user describing them, so it may be second-hand or "
+                    "mistaken. met_myself = my own first-hand impression."
+                ),
             },
             ensure_ascii=False,
         )
