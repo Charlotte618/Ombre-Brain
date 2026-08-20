@@ -558,12 +558,9 @@ class ThemService:
         """
         payload: list[dict[str, Any]] = []
         for person in persons:
-            claims = [
-                claim
-                for claim in self.store.list_claims(
-                    scope, person_id=person.id, callable_only=True
-                )
-            ][:max_results]
+            claims = self.store.list_claims(
+                scope, person_id=person.id, callable_only=True
+            )[:max_results]
             notes = [
                 {"aspect": claim.aspect, "content": claim.content}
                 for claim in claims

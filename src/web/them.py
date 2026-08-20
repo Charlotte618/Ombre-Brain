@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from ombrebrain.them import ThemStoreError
+from utils import atomic_update_config_yaml
 
 from . import _shared as sh
 
@@ -21,6 +22,34 @@ from . import _shared as sh
 # 一个人能写满几千 token 的档案，这个模块就变成了在给人建档。
 MAX_TOKENS_CEILING = 4000
 MIN_TOKENS_FLOOR = 200
+
+# 「这个字段没出现在请求里」的哨兵，与「传了 null」区分开。
+_UNSET = object()
+
+
+def _persist_quota(quota: int) -> None:
+    """配额写进 config.yaml，再同步到内存里那份 config。
+
+    只改内存是不行的：进程一重启就被磁盘上的旧值盖回去，而人类在前端看到的是
+    「保存成功」。`atomic_update_config_yaml` 的 docstring 把这个坑写得很清楚，
+    我第一版恰恰就踩了它。
+
+    落盘失败直接往上抛，由调用方转成如实的错误响应——绝不能吞掉异常之后
+    还回「已保存」。
+    """
+    def _mutate(save_config: dict) -> None:
+        section = save_config.setdefault("them", {})
+        if not isinstance(section, dict):
+            section = {}
+            save_config["them"] = section
+        section["max_tokens_per_person"] = quota
+
+    atomic_update_config_yaml(_mutate)
+    # 磁盘先落定再改内存：反过来的话，落盘失败会留下一个内存说 A、磁盘说 B 的
+    # 状态，而这次请求还报了错——下次重启才暴露。
+    runtime_section = sh.them_service.config.setdefault("them", {})
+    if isinstance(runtime_section, dict):
+        runtime_section["max_tokens_per_person"] = quota
 
 
 def register(mcp) -> None:
@@ -68,8 +97,11 @@ def register(mcp) -> None:
         ):
             return JSONResponse({"error": "开关参数格式无效"}, status_code=400)
 
-        quota = body.get("max_tokens_per_person")
-        if quota is not None:
+        # 区分「没传这个字段」和「传了 null」：前者是不改配额，后者是个无效值。
+        # 用 body.get(...) 的话两者都是 None，显式传 null 会被静默当成不改，
+        # 而调用方以为自己设了个值。
+        quota = body.get("max_tokens_per_person", _UNSET)
+        if quota is not _UNSET:
             if isinstance(quota, bool) or not isinstance(quota, int):
                 return JSONResponse({"error": "配额必须是整数"}, status_code=400)
             if not MIN_TOKENS_FLOOR <= quota <= MAX_TOKENS_CEILING:
@@ -98,9 +130,6 @@ def register(mcp) -> None:
                     state = sh.them_service.set_enabled(False, expected_revision=revision)
                 if visible != state.enabled:
                     raise RuntimeError("MCP tool state mismatch")
-                if quota is not None:
-                    section = sh.them_service.config.setdefault("them", {})
-                    section["max_tokens_per_person"] = quota
             except ThemStoreError as exc:
                 try:
                     sh.them_tool_gate.sync(sh.them_service.status().enabled)
@@ -126,5 +155,20 @@ def register(mcp) -> None:
                 except Exception:
                     pass
                 return JSONResponse({"error": "them 开关未能生效"}, status_code=503)
+
+            # 配额落盘单独一段，不裹在上面那个 try 里：它失败的时候开关**已经**
+            # 生效了，混进去会让回滚把开关一起撤掉，还回一句「开关未能生效」——
+            # 报错报在了没坏的那一半上。
+            if quota is not _UNSET:
+                try:
+                    _persist_quota(quota)
+                except Exception:
+                    return JSONResponse(
+                        {
+                            "error": "开关已生效，但每人配额没能写进 config.yaml，"
+                            "仍是原来的值。请检查配置文件是否可写后重试。"
+                        },
+                        status_code=503,
+                    )
 
         return JSONResponse(response_payload(), headers={"Cache-Control": "no-store"})
