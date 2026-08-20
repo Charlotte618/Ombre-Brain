@@ -50,6 +50,7 @@ from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.them import ThemService, ThemStore, ThemToolGate
 from ombrebrain.you import YouService, YouStore, YouToolGate
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from import_memory import ImportEngine
@@ -69,6 +70,7 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools import them as _t_them
 from tools import you as _t_you
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -244,7 +246,15 @@ you_service = YouService(
     source_store=source_store,
     logger=logger,
 )
-# You 不再订阅桶变动：认识由模型显式写入，没有后台抽取，也就没有可观察的事件。
+them_service = ThemService(
+    store=ThemStore(config.get("buckets_dir", "buckets")),
+    bucket_mgr=bucket_mgr,
+    decay_engine=decay_engine,
+    source_store=source_store,
+    config=config,
+    logger=logger,
+)
+# You / them 都不订阅桶变动：认识由模型显式写入，没有后台抽取，也就没有可观察的事件。
 # bucket_mgr 的 observer 机制本身留着，它是通用的。
 
 # --- GitHub Sync / GitHub 同步 ---
@@ -443,6 +453,7 @@ _wsh.init_runtime(
     migrate_engine=migrate_engine,
     github_sync_instance=github_sync_instance,
     you_service=you_service,
+    them_service=them_service,
     restart_github_auto_task=_restart_github_auto_task,
 )
 # 启动时把磁盘上的会话装回内存（容器重启不踢登录）。鉴权/会话逻辑全在 web/_shared.py，
@@ -646,6 +657,7 @@ _tools_runtime.init(
     import_engine=import_engine,
     source_store=source_store,
     you_service=you_service,
+    them_service=them_service,
     logger=logger,
     fire_webhook=_fire_webhook,
     mark_op=_mark_op,
@@ -1218,7 +1230,22 @@ except Exception as _you_gate_exc:
         you_tool_gate.sync(False)
     except Exception:
         pass
-_wsh.init_runtime(you_tool_gate=you_tool_gate)
+them_tool_gate = ThemToolGate(mcp, _t_them.dispatch)
+try:
+    them_tool_gate.sync(them_service.status().enabled)
+except Exception as _them_gate_exc:
+    logger.error("them MCP gate failed closed: %s", type(_them_gate_exc).__name__)
+    _them_state = them_service.status()
+    if _them_state.enabled:
+        try:
+            them_service.set_enabled(False, expected_revision=_them_state.state_revision)
+        except Exception:
+            logger.error("them persistent fail-closed update failed", exc_info=True)
+    try:
+        them_tool_gate.sync(False)
+    except Exception:
+        pass
+_wsh.init_runtime(you_tool_gate=you_tool_gate, them_tool_gate=them_tool_gate)
 migrate_engine.attach_you_runtime(you_service, you_tool_gate)
 
 

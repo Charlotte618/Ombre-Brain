@@ -1,0 +1,386 @@
+"""them 的写入、姓名命中、衰减排序与配额：模型自己写，全程不碰 LLM。
+
+这些用例锁的是 rule.md 13.3 那几条边界：形态同 You（两桶 + 三日）、
+只记这个人本身不描述关系、姓名命中任一别名即返回、按提及自然衰减、
+每人配额满了系统只挡不代压。
+"""
+
+import json
+
+import pytest
+
+from ombrebrain.them import Person, ThemService, ThemStore, ThemStoreError
+from ombrebrain.them.service import (
+    MAX_CANDIDATES_PER_PERSON,
+    MAX_SURFACED_PERSONS,
+    MIN_SUPPORTING_BUCKETS,
+    REQUIRED_CONFIRMATIONS,
+)
+
+
+class FakeBucketManager:
+    def __init__(self):
+        self.buckets = {}
+
+    async def get(self, bucket_id):
+        return self.buckets.get(bucket_id)
+
+
+class FakeSourceStore:
+    def __init__(self):
+        self.sources = {}
+
+    def read(self, source_id):
+        return self.sources[source_id]
+
+
+class RealisticDecay:
+    """按 last_active 与 activation_count 排序，够用来验「常被提起的排前面」。
+
+    them 复用的是 decay_engine.calculate_score，这里只需要一个单调一致的替身。
+    """
+
+    @staticmethod
+    def calculate_score(metadata):
+        return float(metadata.get("activation_count") or 1)
+
+
+class ExplodingLLM:
+    """任何一次 LLM 调用都会炸。
+
+    them 与 you 同一条规矩：不许有自动抽取 / 自动复核 / 自动摘要。做成地雷
+    而不是空壳，是为了让「哪天有人把 LLM 接回来」当场变红灯。
+    """
+
+    def __getattr__(self, name):
+        async def _boom(*_args, **_kwargs):
+            raise AssertionError(f"them 不允许调用 LLM，却调了 {name}")
+
+        return _boom
+
+
+def _service(tmp_path, **config):
+    manager = FakeBucketManager()
+    service = ThemService(
+        store=ThemStore(tmp_path),
+        bucket_mgr=manager,
+        decay_engine=RealisticDecay(),
+        source_store=FakeSourceStore(),
+        config=config,
+    )
+    service.dehydrator = ExplodingLLM()
+    return service, manager
+
+
+def _bucket(bucket_id, content, **metadata):
+    return {"id": bucket_id, "content": content, "metadata": {"type": "dynamic", **metadata}}
+
+
+def _enabled(tmp_path, *, buckets=2, **config):
+    service, manager = _service(tmp_path, **config)
+    service.set_enabled(True)
+    for index in range(1, buckets + 1):
+        bucket_id = f"memory-{index}"
+        manager.buckets[bucket_id] = _bucket(
+            bucket_id, f"第 {index} 次，Zoey 讲话都是直奔结论。"
+        )
+    return service, manager
+
+
+def _write(service, **overrides):
+    payload = {
+        "content": "她讲话直奔结论，不铺垫",
+        "bucket_ids": ["memory-1", "memory-2"],
+        "aspect": "communication_preference",
+        "concept_key": "talk_style",
+        "concept_value": "blunt",
+        "names": ["Zoey"],
+    }
+    payload.update(overrides)
+    return service.write(**payload)
+
+
+def _age_receipts(service, claim):
+    """把已有收据的日期改早，模拟「那是前几天记的」。
+
+    改的是测试数据的时间戳，不是绕过判定——三日门槛本身照常由代码算。
+    """
+    from dataclasses import replace
+
+    receipts = tuple(
+        replace(receipt, reviewed_at=f"2026-08-{10 + index:02d}T10:00:00+00:00")
+        for index, receipt in enumerate(claim.review_receipts)
+    )
+    return service.store.put_claim(
+        replace(claim, review_receipts=receipts), expected_revision=claim.revision
+    )
+
+
+class TestGates:
+    @pytest.mark.asyncio
+    async def test_单个出处被拒(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError, match="不能只有一个出处"):
+            await _write(service, bucket_ids=["memory-1"])
+
+    @pytest.mark.asyncio
+    async def test_不存在的桶被拒(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError, match="找不到记忆桶"):
+            await _write(service, bucket_ids=["memory-1", "nope"])
+
+    @pytest.mark.asyncio
+    async def test_首写只落候选(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, message = await _write(service)
+        assert claim.lifecycle == "candidate"
+        assert "候选" in message
+        assert f"另外 {REQUIRED_CONFIRMATIONS - 1} 个" in message
+
+    @pytest.mark.asyncio
+    async def test_同日重申不推进(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        claim, _ = await _write(service)
+        assert claim.review_date_count == 1
+        assert claim.lifecycle == "candidate"
+
+    @pytest.mark.asyncio
+    async def test_三个不同自然日才转正(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service)
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            claim = _age_receipts(service, claim)
+            claim, _ = await _write(service)
+        assert claim.review_date_count == REQUIRED_CONFIRMATIONS
+        assert claim.lifecycle == "formal"
+        assert claim.independent_support_count >= MIN_SUPPORTING_BUCKETS
+
+    @pytest.mark.asyncio
+    async def test_候选读不回来(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        assert await service.recall(query="Zoey") == ""
+
+    @pytest.mark.asyncio
+    async def test_候选条数有上限(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        for index in range(MAX_CANDIDATES_PER_PERSON):
+            await _write(service, concept_key=f"trait_{index:02d}", content=f"特点 {index}")
+        with pytest.raises(ValueError, match="候选已经有"):
+            await _write(service, concept_key="one_too_many", content="再多一条")
+
+
+class TestNoRelationships:
+    """rule.md 13.3：只记这个人本身，不描述任何关系。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "她和我关系很好",
+            "他们两人之间有点僵",
+            "她对我来说是很重要的人",
+            "她比阿哲更亲近我",
+            "她更信任阿哲",
+        ],
+    )
+    async def test_关系描述写不进去(self, tmp_path, content):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError, match="不描述任何关系"):
+            await _write(service, content=content)
+
+    @pytest.mark.asyncio
+    async def test_只讲这个人的句子照常写入(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service, content="她讲话直奔结论，不铺垫")
+        assert claim.content == "她讲话直奔结论，不铺垫"
+
+    @pytest.mark.asyncio
+    async def test_you那张禁止表照样生效(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError):
+            await _write(service, content="她是典型的内向人格")
+
+
+class TestPersons:
+    @pytest.mark.asyncio
+    async def test_昵称命中同一个人(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service, names=["Zoey", "小 Z"])
+        again, _ = await _write(service, names=["小 Z"])
+        assert again.person_id == claim.person_id
+
+    @pytest.mark.asyncio
+    async def test_新称呼会并进已有的人(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await _write(service, names=["Zoey"])
+        await _write(service, names=["Zoey", "阿 Z"])
+        scope = service.status().scope
+        person = service.store.find_person_by_name(scope, "阿 Z")
+        assert person is not None
+        assert set(person.names) == {"Zoey", "阿 Z"}
+
+    @pytest.mark.asyncio
+    async def test_没给名字写不进去(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError, match="至少给一个名字"):
+            await _write(service, names=[])
+
+
+class TestRecall:
+    async def _formalized(self, service):
+        claim, _ = await _write(service)
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            claim = _age_receipts(service, claim)
+            claim, _ = await _write(service)
+        return claim
+
+    @pytest.mark.asyncio
+    async def test_生效之后按姓名读得回(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await self._formalized(service)
+        output = await service.recall(query="今天和 Zoey 聊了聊")
+        assert "直奔结论" in output
+        assert "Zoey" in output
+
+    @pytest.mark.asyncio
+    async def test_读回是一条JSON并写明不是用户(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await self._formalized(service)
+        output = await service.recall(query="Zoey")
+        assert output.count("```json") == 1
+        assert "不是用户本人的信息" in output
+        payload = json.loads(output.split("```json")[1].split("```")[0])
+        assert payload["them"][0]["person"] == "Zoey"
+
+    @pytest.mark.asyncio
+    async def test_没提到名字就不返回(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await self._formalized(service)
+        assert await service.recall(query="今天的天气不错") == ""
+
+    @pytest.mark.asyncio
+    async def test_命中算被提起一次(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        await self._formalized(service)
+        scope = service.status().scope
+        before = service.store.find_person_by_name(scope, "Zoey").activation_count
+        await service.recall(query="Zoey")
+        after = service.store.find_person_by_name(scope, "Zoey").activation_count
+        assert after == before + 1
+
+
+class TestSurface:
+    @pytest.mark.asyncio
+    async def test_无query只追加前三人(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        scope = service.status().scope
+        for index in range(MAX_SURFACED_PERSONS + 2):
+            person = service.store.put_person(scope, Person.new([f"人{index}"]))
+            for _ in range(index):
+                person = service.store.put_person(
+                    scope, person.mentioned(), expected_revision=person.revision
+                )
+        persons = service._top_persons(service.store.list_persons(scope))
+        assert len(persons) == MAX_SURFACED_PERSONS
+        # 提及次数最多的排最前：这就是「按提及时间次数自然衰减」的全部实现
+        assert persons[0].display_name == f"人{MAX_SURFACED_PERSONS + 1}"
+
+    @pytest.mark.asyncio
+    async def test_有query时不受前三名额限制(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        scope = service.status().scope
+        names = [f"人{index}" for index in range(MAX_SURFACED_PERSONS + 2)]
+        for name in names:
+            service.store.put_person(scope, Person.new([name]))
+        matched = service._match_persons(
+            " ".join(names), service.store.list_persons(scope)
+        )
+        assert len(matched) == len(names)
+
+    @pytest.mark.asyncio
+    async def test_关掉them时追加块是空的(self, tmp_path):
+        """rule.md 13.3 那条边界唯一可被检验的形式。"""
+        service, _ = _enabled(tmp_path)
+        await TestRecall()._formalized(service)
+        state = service.status()
+        service.set_enabled(False, expected_revision=state.state_revision)
+        assert await service.surface(query="Zoey") == ""
+
+
+class TestQuota:
+    @pytest.mark.asyncio
+    async def test_超限时拒绝并按aspect分层摆出来(self, tmp_path):
+        service, _ = _enabled(tmp_path, them={"max_tokens_per_person": 200})
+        scope = service.status().scope
+        # 先把配额撑满：直接落 formal，绕开三日只是为了造场景，不是产品路径
+        from dataclasses import replace
+
+        claim, _ = await _write(service)
+        service.store.put_claim(
+            replace(
+                claim,
+                content="她" + "讲话直奔结论。" * 40,
+                lifecycle="formal",
+                review_state="clear",
+                valid_from="2026-01-01T00:00:00+00:00",
+            ),
+            expected_revision=claim.revision,
+        )
+        with pytest.raises(ValueError) as excinfo:
+            await _write(service, concept_key="another_trait", content="她还很守时")
+        message = str(excinfo.value)
+        assert "已经满了" in message
+        assert "communication_preference" in message  # 分层照 I 的模式
+        assert claim.id in message  # 摆出 id，模型才能 delete 掉
+
+    @pytest.mark.asyncio
+    async def test_候选不占配额(self, tmp_path):
+        """候选还没真正落库，占位就等于让不算数的东西挤掉算数的。"""
+        service, _ = _enabled(tmp_path, them={"max_tokens_per_person": 200})
+        for index in range(4):
+            await _write(
+                service, concept_key=f"trait_{index}", content="她" + "讲话直奔结论。" * 10
+            )
+
+    @pytest.mark.asyncio
+    async def test_配置能改上限(self, tmp_path):
+        service, _ = _enabled(tmp_path, them={"max_tokens_per_person": 700})
+        assert service.max_tokens_per_person == 700
+
+
+class TestDelete:
+    @pytest.mark.asyncio
+    async def test_撤回不需要三次确认(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service)
+        message = await service.delete(claim.id)
+        assert "撤回了" in message
+        after = service.store.get_claim(service.status().scope, claim.id)
+        assert after.lifecycle == "expired"
+
+    @pytest.mark.asyncio
+    async def test_依据塌到一个就失效(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim = await TestRecall()._formalized(service)
+        await service.remove_bucket_evidence("memory-1")
+        after = service.store.get_claim(service.status().scope, claim.id)
+        assert after.lifecycle == "expired"
+        assert not after.callable_at()
+
+
+class TestDisabled:
+    @pytest.mark.asyncio
+    async def test_关闭时读写都不通(self, tmp_path):
+        service, _ = _service(tmp_path)
+        with pytest.raises(ThemStoreError):
+            await service.recall(query="Zoey")
+        with pytest.raises(ThemStoreError):
+            await _write(service)
+
+    @pytest.mark.asyncio
+    async def test_默认关闭时不建库(self, tmp_path):
+        service, _ = _service(tmp_path)
+        assert service.status().enabled is False
+        assert not service.store.exists

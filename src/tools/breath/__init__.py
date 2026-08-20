@@ -49,6 +49,29 @@ async def _with_deletion_requests(body: str) -> str:
     return f"{batch}\n\n{body}" if batch and body else (batch or body)
 
 
+async def _with_them(body: str, query: str = "") -> str:
+    """把 them 的认识追加在浮现结果**之后**。
+
+    独立通道，不进融合打分：任何一条普通记忆的分数与名次都不因为 them 的存在
+    而改变（rule.md 13.3）。them 关着时这里返回空串，输出与没有这个模块时
+    逐字一致——这也是那条边界唯一可被检验的形式。
+
+    只挂在浮现与检索两条路上。catalog / feel / plan / importance 是定向通道，
+    问的是特定的东西，往里塞一段人物补注只是噪音。
+    """
+    service = getattr(rt, "them_service", None)
+    if service is None:
+        return body
+    try:
+        block = await service.surface(query=query)
+    except Exception as exc:
+        rt.logger.warning(f"them surface skipped / them 追加块跳过: {exc}")
+        return body
+    if not block:
+        return body
+    return f"{body}\n\n{block}" if body else block
+
+
 async def dispatch(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -157,14 +180,14 @@ async def dispatch(
 
     # --- 无 query：浮现模式 ---
     if not query or not query.strip():
-        return await _with_deletion_requests(await surface_default(
+        return await _with_deletion_requests(await _with_them(await surface_default(
             max_results=max_results,
             max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
-        ))
+        )))
 
     # --- 有 query：检索模式 ---
-    return await _with_deletion_requests(await surface_search(
+    return await _with_deletion_requests(await _with_them(await surface_search(
         query=query,
         max_results=max_results,
         max_tokens=memory_max_tokens,
@@ -175,4 +198,4 @@ async def dispatch(
         date_from=date_from,
         date_to=date_to,
         with_quotes=quotes,
-    ))
+    ), query))

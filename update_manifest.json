@@ -751,6 +751,36 @@
       "size": 6341
     },
     {
+      "path": "src/ombrebrain/them/__init__.py",
+      "sha256": "880a9ff85312b69ae9b25ad77c384cc221e9470f13747234446cf0613c72a192",
+      "size": 725
+    },
+    {
+      "path": "src/ombrebrain/them/models.py",
+      "sha256": "0c51a5329600852fe0ecefe4a157c5ac9d4aff23be42895ee83fd2d5ca47c932",
+      "size": 7945
+    },
+    {
+      "path": "src/ombrebrain/them/safety.py",
+      "sha256": "e57c26219081cf76ed010574a456ef9e449db86b82f36d81db5b96797263cfb7",
+      "size": 3100
+    },
+    {
+      "path": "src/ombrebrain/them/service.py",
+      "sha256": "1d7150c7ae9550b655fd8903e1a6d2c43511a3f85284836c49d856d5c3f74525",
+      "size": 27148
+    },
+    {
+      "path": "src/ombrebrain/them/store.py",
+      "sha256": "ed3a7bccd85947af1d448eb2d8c880bb76693a46b62be3708e3e3930c7000586",
+      "size": 17382
+    },
+    {
+      "path": "src/ombrebrain/them/tool_gate.py",
+      "sha256": "58bb5481819d326355f83d9e6eca0f436cb93d549589eeeb61d00ef4d6144773",
+      "size": 3450
+    },
+    {
       "path": "src/ombrebrain/version.py",
       "sha256": "4b54b1a52e6ad3c8ba5f27dd5e4c0ac9ed75bf5c3de141a78e6b5e112b34df19",
       "size": 228
@@ -762,8 +792,8 @@
     },
     {
       "path": "src/ombrebrain/you/models.py",
-      "sha256": "31457cb60e18db3bfd629ea1208d14bea265b89abc2d9e0aceaf836b7d1192d9",
-      "size": 18287
+      "sha256": "c7f90adc6bfce15cf8c0018b5fdae8487fc3170b8b1d157e26a0688f1c2ee46a",
+      "size": 19324
     },
     {
       "path": "src/ombrebrain/you/safety.py",
@@ -797,8 +827,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "c50ca7463a4c6d1ce9ba65fbbab2a384f8728567d22ab6a735883ce6bf86dbde",
-      "size": 70438
+      "sha256": "443323978be3dc9efea10105bb56ff8491f10e76c70a87404e0d130ed9b0b513",
+      "size": 71446
     },
     {
       "path": "src/server_app.py",
@@ -822,8 +852,8 @@
     },
     {
       "path": "src/tools/_runtime.py",
-      "sha256": "530f30c82f8547eb62f6b4388b483a2eb8e7833f105b27bb7ead88c760cfdced",
-      "size": 6788
+      "sha256": "95dfc9f6f2d5ecdb989c20c9c38f6f63fe7d2b3c679609034bd5e64c3f1768ec",
+      "size": 6776
     },
     {
       "path": "src/tools/anchor/__init__.py",
@@ -837,8 +867,8 @@
     },
     {
       "path": "src/tools/breath/__init__.py",
-      "sha256": "985094655968ae16722f795549f9f82d4ed9fa0360716151d33d2052c18b57b2",
-      "size": 6526
+      "sha256": "9bbe82d4ed9cdf29a5ad86292bd807c3287ec1e2ac3a1cfbb038ac8e533ffcfd",
+      "size": 7524
     },
     {
       "path": "src/tools/breath/_verbatim.py",
@@ -872,8 +902,8 @@
     },
     {
       "path": "src/tools/dream/__init__.py",
-      "sha256": "549dd8bd706cb0b69d2ceee98369f858bc2adb594ea0b2f0b43832224c17f257",
-      "size": 2934
+      "sha256": "0c263921b241ef6f4346246c023f87d483575e2f0cb95115ace0ed5971137542",
+      "size": 3583
     },
     {
       "path": "src/tools/dream/candidates.py",
@@ -956,6 +986,16 @@
       "size": 24648
     },
     {
+      "path": "src/tools/them/__init__.py",
+      "sha256": "f75248e4c517eb4351403c10bea17457c5e723516512b0c8ba2839a0f96d5764",
+      "size": 51
+    },
+    {
+      "path": "src/tools/them/core.py",
+      "sha256": "2a0b50b09ccdcd15054a60b7216d0eb79ea9c4f638b6ec4b50f9548e9096955e",
+      "size": 1980
+    },
+    {
       "path": "src/tools/trace/__init__.py",
       "sha256": "b51eea3be52623f655cf625fb41ec55de518f339a828c46c15bbdbd0be8c79be",
       "size": 488
@@ -992,13 +1032,13 @@
     },
     {
       "path": "src/web/__init__.py",
-      "sha256": "f5ab5e9b63cc4f2446c871fc3f2ac7b6794fb02c52441f77e0e37d8046ef9c97",
-      "size": 2354
+      "sha256": "c126de861ff87df881e75ea6d429e334ce2ba35b18139de29f699d6017b5fe49",
+      "size": 2406
     },
     {
       "path": "src/web/_shared.py",
-      "sha256": "e33388ff023c67eec3340fc5b2e12fba4c958862cd13da5c16d5d35cd662157d",
-      "size": 42640
+      "sha256": "fa699d0e6aa78e94a29ffe5fe267fac7da3dc353b043cc3a721b15344eb29b22",
+      "size": 42682
     },
     {
       "path": "src/web/auth.py",
@@ -1084,6 +1124,11 @@
       "path": "src/web/system.py",
       "sha256": "c60dbcd0d868b93914c84733c7c8e9568b0793b3072f9b0dcda2d784a1b0f530",
       "size": 63883
+    },
+    {
+      "path": "src/web/them.py",
+      "sha256": "c9b46de9035e6cac4c8cd02015bce399125fcf9e8bdbe32653fa44726b0fb0da",
+      "size": 5713
     },
     {
       "path": "src/web/tunnel.py",

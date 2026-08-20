@@ -253,8 +253,20 @@ class ReviewReceipt:
         }
 
 
+# `_new_id` / `_require_id` / `_require_text` 的公开别名。
+# `them` 是照 `You` 的形态建的（rule.md 13.3），复用这三件比各自抄一份好：
+# 抄一份意味着两边的 id 规则会慢慢漂开，而它们本该一模一样。
+new_id = _new_id
+require_id = _require_id
+require_text = _require_text
+
+
 @dataclass(frozen=True)
 class YouClaim:
+    # 子类（`them.models.ThemClaim`）换 id 前缀用。除此之外 them 的条目
+    # 与 you 完全同构，这也是 rule.md 13.3 写「形态同 You」的落点。
+    ID_PREFIX = "you"
+
     id: str
     scope: Scope
     concept_key: str
@@ -279,7 +291,7 @@ class YouClaim:
     updated_at: str = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "id", _require_id(self.id, "you"))
+        object.__setattr__(self, "id", _require_id(self.id, self.ID_PREFIX))
         object.__setattr__(
             self, "concept_key", _require_text(self.concept_key, "concept_key", limit=120).lower()
         )
@@ -333,7 +345,7 @@ class YouClaim:
         conflicts_with: tuple[str, ...] = (),
     ) -> "YouClaim":
         return cls(
-            id=_new_id("you"),
+            id=_new_id(cls.ID_PREFIX),
             scope=scope,
             concept_key=concept_key,
             concept_value=concept_value,
@@ -385,6 +397,16 @@ class YouClaim:
         )
 
     @classmethod
+    def _extra_from_dict(cls, value: Mapping[str, Any]) -> dict[str, Any]:
+        """子类比 YouClaim 多出来的字段。基类没有多的。
+
+        存在的理由是 `from_dict` 用 `cls(...)` 构造：子类（`ThemClaim`）继承它
+        时，多出来的必填字段得有地方补进去，否则子类只能把这三十行抄一遍，
+        然后两份解析逻辑开始各自演化。
+        """
+        return {}
+
+    @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "YouClaim":
         scope_raw = value.get("scope")
         if not isinstance(scope_raw, Mapping):
@@ -416,6 +438,7 @@ class YouClaim:
             revision=value.get("revision", 1),
             created_at=value.get("created_at", ""),
             updated_at=value.get("updated_at", ""),
+            **cls._extra_from_dict(value),
         )
 
     def to_dict(self) -> dict[str, Any]:

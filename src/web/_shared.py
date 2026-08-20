@@ -176,6 +176,8 @@ github_sync_instance = None
 v3_runtime = None
 you_service = None
 you_tool_gate = None
+them_service = None
+them_tool_gate = None
 
 
 def init(cfg: dict) -> None:
