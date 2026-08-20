@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "19bb5327f8c85a922ce0182d9d097fd5deae3fc164e50f38346e3d9c0aade608",
-      "size": 559656
+      "sha256": "bda01c7433a70ae5f342db3a19f59bf622f91b38eeb3af33f6adc8d353ae983d",
+      "size": 570676
     },
     {
       "path": "frontend/favicon.svg",
@@ -767,8 +767,8 @@
     },
     {
       "path": "src/ombrebrain/them/service.py",
-      "sha256": "06587df5d7f9a6db69031b3f8bdcc7d2cc43294dde6160a9e9ab1d7e73f94083",
-      "size": 43776
+      "sha256": "f9976277de5da66cc51a598e802d8bec028878fb16cc16bf492897db0fc5e364",
+      "size": 44754
     },
     {
       "path": "src/ombrebrain/them/store.py",
@@ -777,8 +777,8 @@
     },
     {
       "path": "src/ombrebrain/them/tool_gate.py",
-      "sha256": "d6a79b70d48746cbb0e96d637da621e3e7dfd7e9868823de6f2265973f247180",
-      "size": 4695
+      "sha256": "71e5d03dd7e930b8da7233f171855fb564dcdfaff1e60a78f6c956b7c5d668f8",
+      "size": 5078
     },
     {
       "path": "src/ombrebrain/version.py",

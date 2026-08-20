@@ -116,7 +116,8 @@ Ombre-Brain/
 - **embedding_engine.py** — 「门面 + 后端」两层向量化：后端只有**一个 OpenAI 兼容 API 实现**（默认 Gemini 云端）；门面负责 SQLite 存取、余弦搜索、孤儿对账、模型/维度一致性校验（不一致记 OB-W005，不阻止启动）。**本地离线向量化**不是另一个后端，而是把 `base_url` 指向 OB 托管的 Ollama 边车（bge-m3，由 `web/ollama_local.py` 拉起子进程）。旧文档的「bge-small-zh / sentence-transformers 懒加载」已废弃。
 - **bm25_index.py** — BM25 稀疏检索（jieba 中文分词），给 `bucket_manager.search()` 提供 TF-IDF 加权的关键词召回（Dim 7）。`rank_bm25` / `jieba` 是软依赖，未装则静默 no-op，不影响其余维度；索引由 BucketManager 持有，写后脏标记、search 时懒重建。
 - **import_memory.py** — Claude JSON / ChatGPT / DeepSeek / Markdown / 纯文本五种格式的历史对话导入，超长单轮无损分块 + 断点续传 + 精确内容幂等去重 + 词频规律检测。导入只新建桶，不按语义合并旧桶；新桶持久化 `imported: true` 与 `source_tool: import`，创建/最后活跃时间均取导入时刻。
-- **ombrebrain/you/** — `You` 的固定领域策略、三维作用域、SQLite 权威状态、耐久 outbox、来源失效、投影、召回与动态 MCP 工具门禁。数据库位于 `<buckets_dir>/.you/you.sqlite3`，首次显式开启前不创建。
+- **ombrebrain/you/** — `You` 的固定领域策略、三维作用域、SQLite 权威状态、读时依据校验、投影、读回/写入/撤回与动态 MCP 工具门禁。数据库位于 `<buckets_dir>/.you/you.sqlite3`，首次显式开启前不创建。库里的 `outbox` 表是自动派生时代的遗留，已无消费者（见 §3.12）。
+- **ombrebrain/them/** — `them` 的同构实现：按人分份的 SQLite 状态、两道结构性闸（两个记忆桶作依据 + 三个不同自然日重申）、关系描述拦截、两类来源（自己遇到的 / 听人类说的）、独立通道浮现与动态 MCP 工具门禁。禁止清单直接复用 `you.safety`，不抄第二份。数据库位于 `<buckets_dir>/.them/them.sqlite3`，首次显式开启前不创建。详见 §3.13。
 - **ombrebrain/storage/backup_archive.py** — 本地备份格式：读取 Markdown 与 `_sources/src_<sha256>.source`、用 SQLite backup API 生成 embeddings 和可选 `You` 一致性快照、写 `backup_manifest.json`（逐文件 size + SHA-256）；导出/导入同时限制 ZIP 文件数、体积和压缩率，并校验路径、证据哈希、UTF-8、SQLite 完整性与 `You` 固定 schema，拒绝路径穿越、符号链接、重复路径和损坏清单。
 - **migrate_engine.py** — 完整记忆包导入：把 `/api/export` 产生的 zip 增量 merge 进当前系统；证据在任何桶写入前完成校验并按不可变语义安装；识别 ID 冲突（skip/overwrite/keep_both），兼容新旧 embedding schema。模型不一致或快照缺向量时写入耐久 outbox，不把网络调用放在恢复事务里。旧版无清单包可兼容导入并标记未验证；旧包缺被引用证据时保留事件桶但明确警告。
 - **ombrebrain/storage/vault_health.py** — Dashboard 与 `tools/check_buckets.py` 共用的只读健康检查：Markdown 解析、重复 ID、越界软链接、SQLite `quick_check`、孤儿向量、缺失且未进入 outbox 的向量。
@@ -266,9 +267,9 @@ feel 桶自身：
 
 ---
 
-## 3. MCP 工具规格（16 个基础工具；另有 1 个可选工具）
+## 3. MCP 工具规格（16 个基础工具；另有 2 个可选工具）
 
-> **单连接器（3.4.0 起）**：16 个工具全在 `/mcp` 上，可选 `You` 按独立开关在其上动态注册/移除。
+> **单连接器（3.4.0 起）**：16 个工具全在 `/mcp` 上，可选的 `You` 与 `Them` 各按自己的独立开关在其上动态注册/移除（只开一个 17，两个都开 18）。
 > 信件 3.2.0 曾拆到 `/mcp-extra`，3.4.0 并回主链路，该端点再次退役返回 404。
 > - 高频 7 个 —— `breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream`
 > - 低频 6 个 —— `feel` / `anchor` / `release` / `pulse` / `plan` / `I`
@@ -530,24 +531,96 @@ dream 侧配合（`src/tools/dream/hints.py` + `output.py`）：
 - 见证计数由 `dream/__init__.py` 在最终输出渲染完成后调 `tools.i.record_dream_pass()` 写入，按不同日期去重。只要待沉淀候选的结构化记忆块实际出现在本次输出（近期记忆、候选主块或碰撞材料），就算一次见证；所有位置都因预算未展开时才不计次。
 - 碰撞只摆材料，**不做矛盾/重复判定**（认知层边界，`rule.md` 第 5 条）。
 
-### 3.12 `You` — 默认隐藏的派生认识召回
+### 3.12 `You` — 默认隐藏的「我对你的认识」
 
-签名：`You(query="", aspect="", max_results=6)`，实现位于 `src/tools/you/` 与
-`ombrebrain/you/`。它不是固定第 17 个工具：默认关闭时完全不注册，只有 Dashboard 的独立
-开关开启后，`YouToolGate` 才在当前 FastMCP 实例中添加这一项；关闭时先移除工具再持久化关闭。
+签名：`You(query="", aspect="", content="", bucket_ids=None, concept_key="",
+concept_value="", basis="observed_pattern", explicit=False, long_term=False,
+delete_id="", max_results=6)`，实现位于 `src/tools/you/core.py:14` 与 `ombrebrain/you/`。
+无参或带 `query` 是读回；带 `content` 是写入或重申；带 `delete_id` 是撤回。
+
+> **3.4.x 变更**：这一节此前描述的是「LLM 抽取候选 → LLM 复核 → 读回前再由第三次 LLM
+> 磨成语义零件」的三层结构，`You` 也只是个只读工具。三层 LLM 已经**整个删除**，
+> `You` 变成可读回、可写入、可撤回。写入路径**不得调用任何 LLM**，测试以一个
+> 「任何调用都抛断言」的假 dehydrator 锁死这条。
+
+它不是固定第 17 个工具：默认关闭时完全不注册，只有 Dashboard 的独立开关开启后，
+`YouToolGate` 才在当前 FastMCP 实例中添加这一项；关闭时先移除工具再持久化关闭。
 工具处理函数每次仍重新读取权威状态，因此缓存旧清单的客户端直调只能得到未知工具错误。
 
 `You` 不复用 `mcp_require_auth`，也不改变其他工具 manifest、SessionStart、`breath` 或 hook。
-它只选择同一 owner/role/user 作用域内 `formal + clear + current + callable` 的 Claim，再生成
-最多 6 条、约 160 token 的非句子语义零件。返回前会与桶正文、不可变 Source、Claim 和投影做
-归一化连续片段检查；生成或检查失败就返回空，不回退原文。调用模型必须结合当前对话重新组织
-语言。前端除总开关外没有 Claim、证据、画像、历史、计数或审核入口。
+读回时选择同一 owner/role/user 作用域内 `formal + clear + current + callable` 的 Claim，
+**直接返回模型自己写下的正文**——不再过一层抽象。原文复制检查仍在，但移到了**写入**那一侧：
+正文与记忆桶原文归一化后连续重合即拒（`leaks_protected_text`），防的是把桶里的话照抄成
+一条「认识」。前端除总开关外没有 Claim、证据、画像、历史、计数或审核入口。
 
-持久化位于 `<buckets_dir>/.you/you.sqlite3`。开关、Claim、Projection 与 content-free outbox
-在同一 SQLite 库中；普通桶提交后才登记 bucket ID/hash/revision，关闭期间不排队、不处理，
-重新开启也不回填此前历史。允许类别和证据门槛见 `docs/YOU_MODULE_SPEC.md` 与 ADR-0004。
-默认的 `docs/CLAUDE_PROMPT.md` 只描述分布在两个连接器上的 16 个基础工具，不预告关闭态的 `You`；开启后的发现以
+持久化位于 `<buckets_dir>/.you/you.sqlite3`，开关、Claim 与 Projection 同库。
+库里那张 `outbox` 表是**自动派生时代的遗留**，3.4.x 拆掉观察者之后已经没有任何消费者
+（`ombrebrain/you/store.py:47-50`、`:81`），旧快照里的残留内容也不再校验。
+依据失效改由**读时校验**承担，见 §3.13 的"闸二"。
+允许类别和证据门槛见 `docs/YOU_MODULE_SPEC.md` 与 ADR-0004。
+默认的 `docs/CLAUDE_PROMPT.md` 只描述 16 个基础工具，不预告关闭态的 `You` 与 `Them`；开启后的发现以
 MCP `tools/list` / tool search 为准，确保关闭时模型侧也不可见。
+
+### 3.13 `Them` — 默认隐藏的「我对其他人的认识」（3.5.0）
+
+签名：`Them(query="", content="", names=None, person_id="", bucket_ids=None,
+aspect="", concept_key="", concept_value="", basis="observed_pattern",
+delete_id="", max_results=12)`，实现位于 `src/tools/them/core.py:15` 与 `ombrebrain/them/`。
+形态照 `You`：默认关闭、由模型自己写、不经 LLM 转述、同一套禁止清单
+（`ombrebrain/them/safety.py` 直接复用 `you.safety`，不抄第二份）。
+开关走 `ThemToolGate`，关掉时工具**完全消失**而不是留在清单里返回「已关闭」——
+留着的话，模块开没开就成了模型能看见的信息。
+
+持久化在 `<buckets_dir>/.them/them.sqlite3`（`ombrebrain/them/store.py:159`），与 you 分库。
+
+**两道结构性闸**（`ombrebrain/them/service.py:68-69`）：
+
+- **闸一 — 依据**：`MIN_SUPPORTING_BUCKETS = 2`，至少两个真实记忆桶，
+  **且每个桶的正文里都要出现这个人的称呼**（`_build_edges`）。只用代词承接的桶会被拒——
+  一条依据自己都指不明白是谁，就不该拿来撑一条关于谁的判断。
+- **闸二 — 时间**：`REQUIRED_CONFIRMATIONS = 3`，要在**三个不同自然日**重申过才落库。
+  改动已生效的条目同样要重新攒三天。撤回不需要确认：立一条要时间来验，
+  收回一个判断不该比立一个更难。
+
+**依据失效是读时校验，不是事件通知。** `_drop_unsupported` 在每次读回时调
+`partition_by_live_evidence`（`ombrebrain/you/service.py:70`，与 you 共用），
+现场把撑不住的条目置为 `expired`。走这条路是因为桶变动观察者在 3.4.x 被拆掉后一直没有替代，
+`remove_bucket_evidence` 事实上成了只有测试在调的死代码。
+**只认删除，不认归档**：归档只改变可见性（rule.md 第 9 条、`YOU_MODULE_SPEC` §9.3），
+而自动衰减归档是常态——让它触发失效，等于一条立住的认识会被时间清空。
+
+**两类人，分界是「模型怎么认识这个人的」**，不是谁登记的（`models.py` 的
+`ORIGIN_MODEL` / `ORIGIN_HUMAN`）：
+
+- `met_myself` —— 模型自己遇到的，第一手。人类只看得见称呼。
+- `heard_from_user` —— 人类登记、模型没见过的，关于他的一切都是转述。
+  这一份的正文对人类可见，且可以留言纠错——纠错要有对象，看不见就只能瞎猜。
+
+**撞名不自动合并**：`_resolve_person` 命中 `human_visible` 的同名人时抛错并给出 `person_id`，
+由模型自己判断是不是同一个人。按字符串并成一份就是张冠李戴，而且并完之后模型第一手的
+印象还会被标成「你说过的话」。同为模型自己遇到的两个同名人照常并称呼——那一档没有混淆风险。
+
+**读回是一条 JSON**（`_render`），每个人带 `known_via`（`met_myself` / `heard_from_user`）
+与 `notes`，外加 `attribution_note` / `known_via_note`。用 JSON 而不是散文，是因为这些话说的
+全是**别人**：混在自然语言里返回，容易幻觉的模型会把「Zoey 说话很直接」重述成用户的属性。
+
+**只记这个人本身，不描述任何关系**（`safety.describes_relationship`）。主判据是**人称**
+（`safety.py:58`）：一句只讲这个人的话不需要提到「我」，一旦出现第一人称，主语就不再只是他了。
+句式表（`_RELATIONSHIP_PATTERNS`）留着，管的是不含人称的那一类（「A 和 B 之间有点僵」）。
+先前只有句式表时，真机六句漏掉四句。
+
+**独立通道**：`surface()` 只在 breath / dream 的浮现结果**之后**追加，不进融合打分。
+关掉 them，两者输出必须与没有这个模块时逐字一致——这是这条边界唯一可被检验的形式。
+无 query 时按衰减权重取前三（`MAX_SURFACED_PERSONS = 3`），有 query 时姓名命中不受名额限制。
+衰减复用 `decay_engine.calculate_score()`，只喂 `activation_count` + `last_active`，不另立曲线。
+
+**配额**：每人 `DEFAULT_MAX_TOKENS_PER_PERSON = 1500`（前端 200–4000 可调，写进
+`config.yaml` 的 `them.max_tokens_per_person`）。写满时系统**只挡不代压**：把这个人的条目
+按 aspect 分层摆给模型，由它自己决定合并哪几条。候选不占配额，上限 `MAX_CANDIDATES_PER_PERSON = 12`。
+
+**人类那一侧**只改得动称呼、只能留言纠错（`src/web/them.py`）。改称呼与留言都**不算**
+「这个人被提起了一次」——那会凭空抬高衰减权重；留言也**不占配额**，配额管的是模型自己
+沉淀了多少。两者都在下次浮现的尾部交给模型一次，读完就清。
 
 ---
 
