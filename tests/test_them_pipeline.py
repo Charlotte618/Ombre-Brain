@@ -157,10 +157,76 @@ class TestGates:
         assert claim.independent_support_count >= MIN_SUPPORTING_BUCKETS
 
     @pytest.mark.asyncio
-    async def test_候选读不回来(self, tmp_path):
+    async def test_候选不作为认识被召回(self, tmp_path):
+        """候选不进 them 块——还没算数的东西不该被当认识用。
+
+        但它会出现在**欠账清单**里（见 TestPendingDigest）：那两件事必须分清，
+        不然「看得见自己写过什么」和「可以拿它当已成立的判断」就混成一件事了。
+        """
         service, _ = _enabled(tmp_path)
         await _write(service)
-        assert await service.recall(query="Zoey") == ""
+        输出 = await service.recall(query="Zoey")
+        assert "关于**别人**的长期认识" not in 输出  # them 块的块头没出现
+        assert '"them"' not in 输出
+
+    @pytest.mark.asyncio
+    async def test_候选不进浮现(self, tmp_path):
+        """breath / dream 那条路一个字都不该有：浮现是想起了什么，不是待办。"""
+        service, _ = _enabled(tmp_path)
+        await _write(service)
+        assert await service.surface(query="Zoey") == ""
+
+
+class TestPendingDigest:
+    """还在攒的候选要看得见，否则三日门槛根本走不完。
+
+    候选不进召回是对的，但它同时意味着写完就失联——重申要求「同一个
+    concept_key + concept_value 再写一次」，而那两个字符串只存在于写它的
+    那次对话里。跨会话之后模型记不得自己填过什么，那条候选就永远停在原地。
+
+    真机试用时就是这么发现的：写完一条候选，读回是空的，再没有任何入口
+    能问出「我有哪些在攒的」。
+    """
+
+    @pytest.mark.asyncio
+    async def test_显式读回时给出欠账与重申用的键(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        输出 = await service.recall(query="Zoey")
+        assert "还没算数" not in 输出  # 还没写，自然没有欠账
+
+        await _write(service)
+        输出 = await service.recall(query="Zoey")
+        assert "还没算数" in 输出
+        assert "talk_style=blunt" in 输出  # 重申要用的两个键
+        assert "还差 2 个不同的日子" in 输出
+
+    @pytest.mark.asyncio
+    async def test_无query时列出全部候选而不只是前三人(self, tmp_path):
+        """欠账清单不受浮现的前三名额限制——那是待办，不是浮现。"""
+        service, manager = _enabled(tmp_path, buckets=2)
+        for index in range(MAX_SURFACED_PERSONS + 2):
+            名 = f"人{index}"
+            for 桶 in ("a", "b"):
+                bid = f"{名}-{桶}"
+                manager.buckets[bid] = _bucket(bid, f"{名}又一次这样做。")
+            await _write(
+                service, names=[名], bucket_ids=[f"{名}-a", f"{名}-b"],
+                concept_key=f"trait_{index}", content=f"关于{名}的一个判断",
+            )
+        输出 = await service.recall()
+        for index in range(MAX_SURFACED_PERSONS + 2):
+            assert f"人{index}" in 输出
+
+    @pytest.mark.asyncio
+    async def test_转正之后就不在欠账里了(self, tmp_path):
+        service, _ = _enabled(tmp_path)
+        claim, _ = await _write(service)
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            claim = _age_receipts(service, claim)
+            claim, _ = await _write(service)
+        输出 = await service.recall(query="Zoey")
+        assert "还没算数" not in 输出
+        assert "直奔结论" in 输出  # 已经作为认识出现了
 
     @pytest.mark.asyncio
     async def test_候选条数有上限(self, tmp_path):
@@ -318,6 +384,28 @@ class TestNoRelationships:
         ],
     )
     async def test_关系描述写不进去(self, tmp_path, content):
+        service, _ = _enabled(tmp_path)
+        with pytest.raises(ValueError, match="不描述任何关系"):
+            await _write(service, content=content)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "他跟我配合得比别人顺",
+            "他比别人更懂我",
+            "他站在我这边",
+            "我们合作起来很顺",
+            "他记得我说过的每一件事",
+        ],
+    )
+    async def test_带人称的句子一律挡下(self, tmp_path, content):
+        """真机试用时这几句全漏了，第一版只有一张关系句式表。
+
+        中文表达关系的方式太多，补词表永远补不完。换成结构性判据：
+        them 记的是这个人本身，一句只讲他的话不需要提到「我」；
+        一旦提到我，主语就不再只是他了。
+        """
         service, _ = _enabled(tmp_path)
         with pytest.raises(ValueError, match="不描述任何关系"):
             await _write(service, content=content)

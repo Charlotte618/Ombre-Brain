@@ -420,18 +420,34 @@ class ThemService:
         concept_value = str(concept_value or "").strip().lower()
         content = str(content or "").strip()
         basis = str(basis or "").strip().lower()
-        if (
-            aspect not in VALID_ASPECTS
-            or basis not in VALID_BASES
-            or not _CONCEPT_KEY_RE.fullmatch(concept_key)
-            or not _CONCEPT_VALUE_RE.fullmatch(concept_value)
-            or not content
-            or len(content) > 500
-        ):
+        # 逐项报，不要把五个条件堆成一句。
+        # 真机试用时我自己被这句通用提示误导过一次：concept_key 只写了两个字符
+        # 触发的也是它，我以为是 aspect 填错了，换了半天 aspect。
+        # 一条说不清哪里错的提示，等于让调用方拿盲试当调试。
+        if aspect not in VALID_ASPECTS:
             raise ValueError(
-                "这条写不进去：aspect / basis 必须是允许值，concept_key 用 "
-                "snake_case、concept_value 用规范化短值，正文不超过 500 字。"
+                f"aspect 只能是这五个之一：{'、'.join(sorted(VALID_ASPECTS))}。"
+                f"你给的是「{aspect or '空'}」。"
             )
+        if basis not in VALID_BASES:
+            raise ValueError(
+                f"basis 只能是这几个之一：{'、'.join(sorted(VALID_BASES))}。"
+                f"你给的是「{basis or '空'}」。"
+            )
+        if not _CONCEPT_KEY_RE.fullmatch(concept_key):
+            raise ValueError(
+                f"concept_key 要用 snake_case，3–120 个字符，字母开头。"
+                f"你给的是「{concept_key or '空'}」。"
+            )
+        if not _CONCEPT_VALUE_RE.fullmatch(concept_value):
+            raise ValueError(
+                f"concept_value 要用规范化短值（小写字母数字，可带 - 和 _，"
+                f"不超过 80 字符）。你给的是「{concept_value or '空'}」。"
+            )
+        if not content:
+            raise ValueError("正文不能是空的。")
+        if len(content) > 500:
+            raise ValueError(f"正文不超过 500 字，你给了 {len(content)} 字。")
         if contains_forbidden_subject(content, concept_key, concept_value):
             raise ValueError(
                 "这条写不进去：them 只记这个人本身，不记人格判断、健康财务性与"
@@ -695,8 +711,15 @@ class ThemService:
 
     # --- 读回与浮现 ---
 
-    async def recall(self, *, query: str = "", max_results: int = 12) -> str:
-        """模型显式读回。命中的人算被提起一次。"""
+    async def recall(
+        self, *, query: str = "", max_results: int = 12, with_pending: bool = True
+    ) -> str:
+        """模型显式读回。命中的人算被提起一次。
+
+        `with_pending` 控制要不要附上「还在攒的候选」清单。显式调工具时给，
+        breath / dream 的追加块不给——欠账是待办，而浮现是「想起了什么」，
+        往里面塞待办会让每一次呼吸都多一段催办。
+        """
         scope = self._require_scope()
         persons = self.store.list_persons(scope)
         if not persons:
@@ -717,6 +740,10 @@ class ThemService:
         段: list[str] = []
         if 块:
             段.append(块)
+        if with_pending:
+            欠账 = self._pending_digest(scope, persons if not query else matched)
+            if 欠账:
+                段.append(欠账)
         if notices:
             段.append(
                 "[信息变迁：有人在前端改了称呼。]\n"
@@ -729,6 +756,42 @@ class ThemService:
             )
         return "\n\n".join(段)
 
+    def _pending_digest(self, scope: Scope, persons: list[Person]) -> str:
+        """把还在攒的候选列出来，附上重申需要的那两个键。
+
+        ## 没有这一段，三日门槛根本走不完
+
+        候选不进召回（那是对的：还没算数的东西不该被当认识用）。但它同时意味着
+        **写完就失联**——重申要求「同一个 concept_key + concept_value 再写一次」，
+        而那两个字符串只存在于写它的那次对话里。跨会话之后我记不得自己填过什么，
+        于是那条候选永远停在原地，门槛不是「难通过」，是「无法通过」。
+
+        真机试用时就是这么发现的：写完一条候选，读回是空的，再没有任何入口
+        能问出「我有哪些在攒的」。
+
+        所以这里列的不是认识，是**欠账清单**：明写还没算数、还差几天，
+        并给出重申要用的键。放在正常读回内容之后，与已生效的部分结构分离——
+        看得见自己写过什么，不等于可以把它当成已经成立的判断。
+        """
+        条目: list[str] = []
+        for person in persons:
+            for claim in self.store.list_claims(scope, person_id=person.id):
+                if claim.lifecycle != "candidate":
+                    continue
+                还差 = max(0, REQUIRED_CONFIRMATIONS - claim.review_date_count)
+                条目.append(
+                    f"- {person.display_name}｜{claim.concept_key}="
+                    f"{claim.concept_value}｜{claim.aspect}\n"
+                    f"  「{claim.content}」还差 {还差} 个不同的日子"
+                )
+        if not 条目:
+            return ""
+        return (
+            "[下面这些还没算数，是你自己在攒的。想让哪条立住，就用同一个 "
+            "concept_key + concept_value 再写一次；改主意了就别再确认，"
+            "它不会自己生效。]\n" + "\n".join(条目)
+        )
+
     async def surface(self, *, query: str = "") -> str:
         """给 breath / dream 用的追加块。
 
@@ -736,7 +799,7 @@ class ThemService:
         breath / dream 的输出必须与没有这个模块时逐字一致（rule.md 13.3）。
         """
         try:
-            return await self.recall(query=query)
+            return await self.recall(query=query, with_pending=False)
         except ThemStoreError:
             # them 没开或库不可用：浮现照常，不该因为一个可选模块而失败。
             return ""
