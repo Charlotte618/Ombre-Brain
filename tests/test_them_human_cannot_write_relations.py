@@ -80,3 +80,26 @@ def test_一组称呼里混一个关系词也拦(服务):
     """别让「老张、我老公」这种混搭从旁边溜过去。"""
     with pytest.raises(ValueError, match="关系"):
         服务.add_person(["老张", "我老公"])
+
+
+# --- 模型那一侧也要知道这件事 ---
+
+def _工具描述() -> str:
+    """把 ThemToolGate 注册时用的那段描述取出来。"""
+    import inspect
+
+    from ombrebrain.them.tool_gate import ThemToolGate
+
+    return inspect.getsource(ThemToolGate.sync)
+
+
+def test_工具描述里写明了人类要求也要挡回去():
+    """三个前端口子堵上了，但人类可以直接在对话里说「记住他是我老公」。
+
+    只堵前端而不告诉模型，它照写不误——写入检查能拦下措辞明显的那些，
+    但模型完全可以换个说法绕过去（「他在家里管账」）。真正该让它明白的是
+    **为什么**不记：经历本身就是关系，贴一个标签反而让结论脱离了产生它的事。
+    """
+    描述 = _工具描述()
+    assert "人类让你记关系，你也不记" in 描述
+    assert "经历过的那些事本身" in 描述, "要讲清为什么，不能只说不许"
