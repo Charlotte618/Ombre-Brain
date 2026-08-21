@@ -576,7 +576,6 @@ class BucketManager:
         # --- Optional embedding engine for pre-filtering / 可选 embedding 引擎，用于预筛候选集 ---
         self.embedding_engine = embedding_engine
         self.embedding_outbox = None
-        self.bucket_change_observers: list[Any] = []
         ledger_path = config.get("ledger_path") or os.path.join(
             self.base_dir, "_ledger", "events.jsonl"
         )
@@ -624,45 +623,6 @@ class BucketManager:
     def attach_embedding_outbox(self, outbox) -> None:
         """Attach the durable derived-index queue after both objects exist."""
         self.embedding_outbox = outbox
-
-    def attach_bucket_change_observer(self, observer: Any) -> None:
-        """Attach a synchronous, content-free post-commit observer.
-
-        Observers receive only a content hash, never the bucket body. They must
-        persist their own durable work item without awaiting external services.
-        """
-        if observer is not None and observer not in self.bucket_change_observers:
-            self.bucket_change_observers.append(observer)
-
-    def _notify_bucket_change(
-        self,
-        action: str,
-        bucket_id: str,
-        content: str,
-        *,
-        changed_fields: tuple[str, ...] = (),
-    ) -> None:
-        if not self.bucket_change_observers:
-            return
-        content_hash = hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
-        for observer in tuple(self.bucket_change_observers):
-            callback = getattr(observer, "observe_bucket_change", observer)
-            if not callable(callback):
-                continue
-            try:
-                callback(
-                    action=action,
-                    bucket_id=bucket_id,
-                    content_hash=content_hash,
-                    changed_fields=tuple(changed_fields),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "bucket change observer failed for %s:%s: %s",
-                    action,
-                    bucket_id,
-                    type(exc).__name__,
-                )
 
     def _queue_derived_state(
         self,
@@ -1839,8 +1799,6 @@ class BucketManager:
             metadata,
             {"event_actor": str(event_actor or "system").strip().lower()},
         )
-        self._notify_bucket_change("create", bucket_id, linked_content)
-
         return bucket_id
 
     # ---------------------------------------------------------
@@ -2833,13 +2791,6 @@ class BucketManager:
                 "event_actor": str(event_actor or "system").strip().lower(),
             },
         )
-        self._notify_bucket_change(
-            "update",
-            bucket_id,
-            post.content or "",
-            changed_fields=tuple(sorted(str(key) for key in kwargs)),
-        )
-
         return True
 
     async def hard_delete_test_bucket(self, bucket_id: str, *, reason: str = "") -> dict:
@@ -2886,7 +2837,6 @@ class BucketManager:
             {"provenance": {"kind": "test", "erasable": True}},
             {"reason": normalized_reason, "content_erased": True},
         )
-        self._notify_bucket_change("hard_delete", bucket_id, "")
         logger.warning("Physically erased test bucket: %s", bucket_id)
         return {"ok": True, "deleted": bucket_id}
 
@@ -3040,7 +2990,6 @@ class BucketManager:
                 post.content or "",
                 dict(post.metadata),
             )
-            self._notify_bucket_change("restore", bucket_id, post.content or "")
             logger.info("Restored archived bucket: %s -> %s", bucket_id, committed_path)
             result = {"ok": True, "restored": bucket_id, "type": original_kind}
             meaning_changed = bool(post.get("meaning"))
@@ -3317,7 +3266,6 @@ class BucketManager:
             post.content or "",
             dict(post.metadata),
         )
-        self._notify_bucket_change("delete", bucket_id, post.content or "")
         return True
 
     # ---------------------------------------------------------

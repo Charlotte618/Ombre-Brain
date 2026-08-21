@@ -254,8 +254,9 @@ them_service = ThemService(
     config=config,
     logger=logger,
 )
-# You / them 都不订阅桶变动：认识由模型显式写入，没有后台抽取，也就没有可观察的事件。
-# bucket_mgr 的 observer 机制本身留着，它是通用的。
+# 认识由模型显式写入，没有后台抽取，也就没有可观察的桶变动事件。
+# bucket_mgr 那套 observer 机制已在 3.5.0 删除：3.4.x 拆掉自动派生流水线时
+# 只删了订阅方，发射端空转了一整个大版本，而读代码的人会以为它还能挂钩子。
 
 # --- GitHub Sync / GitHub 同步 ---
 from github_sync import GitHubSync  # type: ignore

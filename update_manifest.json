@@ -42,8 +42,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "3cacc76ea1105576eea5101a1635d3a3508be5728ed5be938bfc034289c55f9c",
-      "size": 201753
+      "sha256": "b786a8ad51cfcddb09d63b6b318a9f64640a57a4e854dad6a59d722549740006",
+      "size": 199678
     },
     {
       "path": "src/decay_engine.py",
@@ -802,8 +802,8 @@
     },
     {
       "path": "src/ombrebrain/you/service.py",
-      "sha256": "2e4b42d19904f9353e063dfc541d77fcb5fbbd372a72b77d51d4d12b4676b1ba",
-      "size": 28077
+      "sha256": "9b8f16ccbf36c724bb1ea80fe0af86ee0d450ca50ffc1d02e83dacb45e4b271f",
+      "size": 28017
     },
     {
       "path": "src/ombrebrain/you/store.py",
@@ -827,8 +827,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "27fa4ffbaa2b1bc7a52d7ac329868b1600cdd16a68c51b1ee2398ec4ca61517d",
-      "size": 71511
+      "sha256": "b8d10620e8bb8443258d9464a75c681b1ee35b952b2d40af3803d3e9f8455747",
+      "size": 71624
     },
     {
       "path": "src/server_app.py",
