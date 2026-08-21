@@ -148,7 +148,47 @@ class ThemService:
             person = self.store.get_person(scope, str(person_id).strip())
             if person is None:
                 raise ValueError(f"没有这个人：{person_id}")
-            return person
+            # 带了 id 也要看 names——**身份闸不能只守没带 id 的那条路。**
+            #
+            # DS 真机撞闸时找到的绕法：直接写两个同名的人会被拦，但错误信息里
+            # 给出了 person_id，它读完照着带上那个 id 再写一次就过了。
+            # 本意是「你确认是同一个人就带 id 再来」，结果成了绕过它的说明书。
+            #
+            # 而且 names 此前被**静默忽略**：模型以为自己把两个称呼并到了一起，
+            # 实际什么都没发生、也没有任何提示，它就照着这个错觉往下写，
+            # 正文里断言「这两个是同一个人」。
+            额外 = [
+                str(name or "").strip()
+                for name in names or []
+                if str(name or "").strip() and str(name or "").strip() not in person.names
+            ]
+            if not 额外:
+                return person
+            别人 = []
+            for name in 额外:
+                另一个 = self.store.find_person_by_name(scope, name)
+                if 另一个 is not None and 另一个.id != person.id:
+                    别人.append((name, 另一个))
+            if 别人:
+                清单 = "、".join(
+                    f"「{name}」已经是{'、'.join(p.names)}"
+                    f"（person_id={p.id}）的称呼" for name, p in 别人
+                )
+                raise ValueError(
+                    f"{清单}。\n"
+                    "带 person_id 是说「就写这个人」，不是把别人的称呼并过来——"
+                    "两个已经存在的人，系统不会因为一次写入就当成同一个。\n"
+                    "真是同一个人：这一条只写其中一个，另一个人的条目撤掉再重写。\n"
+                    "不是同一个人：names 里只留属于他自己的称呼。"
+                )
+            # 全是新称呼，不构成合并：并进去。原先这里直接 return person，
+            # 新名字被无声丢掉，下次换个叫法就认不出来了。
+            merged = list(dict.fromkeys([*person.names, *额外]))
+            return self.store.put_person(
+                scope,
+                replace(person, names=tuple(merged)),
+                expected_revision=person.revision,
+            )
         cleaned = [str(name or "").strip() for name in names or []]
         cleaned = [name for name in cleaned if name]
         if not cleaned:

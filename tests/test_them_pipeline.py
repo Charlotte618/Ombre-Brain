@@ -484,6 +484,40 @@ class TestPersons:
             p["person_id"] for p in service.list_people() if p["origin"] == "human"
         ][0]
 
+    def test_带person_id时names里混进别人也拦得住(self, tmp_path):
+        """身份闸不能只守没带 person_id 的那条路。
+
+        DS 真机撞闸时找到的：直接写两个同名的人会被拦，但**错误信息里
+        给出了 person_id**——它读完错误信息，带上那个 id 再写一次就过了。
+        本意是「你确认是同一个人就带 id 再来」，结果成了绕过这道闸的说明书。
+
+        更糟的是 names 被**静默忽略**：模型以为自己把两个称呼并到了一起，
+        实际什么都没发生，也没有任何提示。它照着这个错觉往下写，
+        写出来的正文里断言「这两个是同一个人」。
+        """
+        service, _ = _enabled(tmp_path)
+        scope = service.status().scope
+        甲 = service.add_person(["张三"])
+        service.store.put_person(scope, Person.new(["张三老师"]))
+        with pytest.raises(ValueError, match="张三老师"):
+            service._resolve_person(scope, ["张三", "张三老师"], 甲.id)
+
+    def test_带person_id时只给他自己的名字照常通过(self, tmp_path):
+        """别把正常路径也堵了：带 id 又重复他已有的称呼，是常见写法。"""
+        service, _ = _enabled(tmp_path)
+        scope = service.status().scope
+        甲 = service.add_person(["张三", "老张"])
+        人 = service._resolve_person(scope, ["张三"], 甲.id)
+        assert 人.id == 甲.id
+
+    def test_带person_id时可以补一个全新的称呼(self, tmp_path):
+        """新名字不属于任何人，不构成合并，应该允许并且真的存下来。"""
+        service, _ = _enabled(tmp_path)
+        scope = service.status().scope
+        甲 = service.add_person(["张三"])
+        人 = service._resolve_person(scope, ["张三", "小张"], 甲.id)
+        assert "小张" in 人.names, "新称呼被静默丢掉了"
+
     @pytest.mark.asyncio
     async def test_一次写入不把两个已有的人并成一个(self, tmp_path):
         """同为模型自己遇到的人，也不能因为写在同一个 names 里就合并。
