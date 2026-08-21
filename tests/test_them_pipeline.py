@@ -670,7 +670,6 @@ class TestQuota:
     @pytest.mark.asyncio
     async def test_超限时拒绝并按aspect分层摆出来(self, tmp_path):
         service, _ = _enabled(tmp_path, them={"max_tokens_per_person": 200})
-        scope = service.status().scope
         # 先把配额撑满：直接落 formal，绕开三日只是为了造场景，不是产品路径
         from dataclasses import replace
 

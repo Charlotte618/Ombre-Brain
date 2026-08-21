@@ -8,7 +8,6 @@ poluz 2026-08-20：「同步到仓库，因为仓库属于模型，对别人的�
 光看代码里有 `them/them.sqlite3` 这个字符串不算数，得真的导出再导入一遍。
 """
 
-import json
 import zipfile
 
 import pytest

@@ -13,7 +13,11 @@ import zipfile
 
 import pytest
 
-from web.github import _pre_import_backup, _should_back_up_before_import
+from web.github import (
+    _pre_import_backup,
+    _rollback_from_backup,
+    _should_back_up_before_import,
+)
 
 
 # 导入实际会写的四类路径，来源见 github_sync 的安装循环与 _MODULE_SNAPSHOT_PATHS
@@ -63,8 +67,6 @@ def test_真打出来的zip里四类文件都在(tmp_path):
 
 
 # --- 回滚 ---
-
-from web.github import _rollback_from_backup
 
 
 def test_失败后能把被覆盖的文件还原回去(tmp_path):

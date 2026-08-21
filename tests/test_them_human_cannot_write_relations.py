@@ -14,8 +14,6 @@ poluz 2026-08-21：「绝对禁止人类在记忆中书写关系定义，只有�
 
 import pytest
 
-from ombrebrain.them import ThemStoreError
-
 import sys
 from pathlib import Path
 
