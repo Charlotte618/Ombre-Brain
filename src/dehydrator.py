@@ -1090,10 +1090,6 @@ class Dehydrator:
         for item in items:
             if not isinstance(item, dict) or not item.get("content"):
                 continue
-            # source_ranges 原样带出去，合法性交给 grow 侧按真实行数校验——
-            # 这里不知道原文有多少行，判不了「超出范围」。
-            if item.get("source_ranges") is not None:
-                item["source_ranges"] = item.get("source_ranges")
             try:
                 importance = max(
                     _IMPORTANCE_MIN,
@@ -1118,6 +1114,12 @@ class Dehydrator:
                 "tags": item.get("tags", [])[:_TAGS_MAX],
                 "importance": importance,
                 "why_remembered": why_remembered,
+                # 这个字典是**显式白名单**，不列在这里的字段一律带不出去。
+                # 真机上就是这么栽的：prompt 要了行号、LLM 也给了，
+                # 结果全被这里滤掉，桶里 ranges 全是空的。
+                # 合法性不在这判——这里不知道原文几行，判不了越界，
+                # 交给 grow 侧按真实行数过滤。
+                "source_ranges": item.get("source_ranges"),
             })
         return validated
 

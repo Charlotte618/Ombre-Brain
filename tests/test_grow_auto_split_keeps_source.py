@@ -115,3 +115,27 @@ async def test_原文存不下时记忆照常入库(装配, monkeypatch):
     await grow_core_mod.grow_core("一行")
     assert len(调用记录) == 1, "记忆本身必须照常写入"
     assert 调用记录[0].get("source_refs") is None
+
+
+def test_digest解析不能把source_ranges滤掉():
+    """`_parse_digest` 的 validated 是**显式字段白名单**，不列进去就带不出来。
+
+    真机上就是这么栽的：prompt 要了行号、DeepSeek 也老老实实给了，
+    结果全被这个白名单滤掉，桶里 ranges 全是空的——而单元测试当时全绿，
+    因为测试喂的是假 dehydrator，根本不走 _parse_digest。
+    """
+    import json
+
+    from dehydrator import Dehydrator
+
+    原始 = json.dumps([{
+        "name": "开会",
+        "content": "早上开会定了方案，讨论了退化路径。" * 3,
+        "source_ranges": [[1, 2]],
+        "importance": 5,
+    }], ensure_ascii=False)
+    出 = Dehydrator._parse_digest(Dehydrator.__new__(Dehydrator), 原始)
+    assert 出, "解析结果不该为空"
+    assert 出[0].get("source_ranges") == [[1, 2]], (
+        f"source_ranges 被白名单滤掉了，实际拿到 {出[0].get('source_ranges')!r}"
+    )
