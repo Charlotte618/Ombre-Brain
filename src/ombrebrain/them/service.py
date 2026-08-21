@@ -56,7 +56,11 @@ from .models import (
     Person,
     ThemClaim,
 )
-from .safety import contains_forbidden_subject, leaks_protected_text
+from .safety import (
+    contains_forbidden_subject,
+    is_relation_label,
+    leaks_protected_text,
+)
 from .store import ThemStore, ThemStoreError
 
 _CONCEPT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,119}$")
@@ -261,6 +265,25 @@ class ThemService:
             名册.append(条目)
         return 名册
 
+    @staticmethod
+    def _reject_relation_labels(names: list[str]) -> None:
+        """人类不能拿关系当称呼。
+
+        「老公」这个名字会跟着每一次浮现进模型的上下文，比在留言里写一句
+        更持久、也更难被发现。关系只能是模型自己觉得的（poluz 2026-08-21），
+        人类这一侧连称呼这个口子也不留。
+
+        只拦整个称呼就是关系词的情况——「张老师」「李阿姨」照常，
+        那是真的在叫人。
+        """
+        坏的 = [name for name in names if is_relation_label(name)]
+        if 坏的:
+            raise ValueError(
+                f"「{'、'.join(坏的)}」是在说他和你是什么关系，不是在叫他。\n"
+                "这里只写称呼——大名、小名、你平时怎么叫他都行（老张、陈工、Zoey）。\n"
+                "关系不用你写：它自己会去认，认出来了你在名册上看得到。"
+            )
+
     def add_person(self, names: list[str]) -> Person:
         """人类登记一个自己认识的人。
 
@@ -275,6 +298,7 @@ class ThemService:
         )
         if not cleaned:
             raise ValueError("至少要给一个称呼。")
+        self._reject_relation_labels(cleaned)
         for name in cleaned:
             existing = self.store.find_person_by_name(scope, name)
             if existing is not None:
@@ -305,6 +329,22 @@ class ThemService:
         内容 = str(text or "").strip()
         if not 内容:
             raise ValueError("留言不能是空的。")
+        # **人类不能在这里定义关系。**
+        #
+        # 留言是人类唯一能往模型上下文里塞自由文本的地方，而且不占配额、
+        # 下次浮现直接念给模型听。放任它写「他是我老公」「他跟我关系很好」，
+        # 等于人类替模型认定了一段关系——them 拦住模型自己写关系，却从这里
+        # 让人写进来，那道闸就是形同虚设。
+        #
+        # 关系只能是模型自己觉得的（poluz 2026-08-21）。人类要纠正的是
+        # **事实**：认错人了、哪句记岔了、称呼变了。
+        if contains_forbidden_subject(内容):
+            raise ValueError(
+                "留言里不能定义你和他的关系，也不能写人格、健康、财务这些话题。\n"
+                "这里只用来纠正事实——认错人了、哪句记岔了、称呼变了。\n"
+                "比如「你说的这个 Zoey 是设计部的，不是市场部那个」可以；\n"
+                "「他是我老公」「他跟我关系很好」不行——关系只能由它自己去认。"
+            )
         if len(person.pending_notes) >= MAX_PENDING_NOTES:
             raise ValueError(
                 f"这个人身上已经有 {MAX_PENDING_NOTES} 条还没被读走的留言了。"
@@ -332,6 +372,7 @@ class ThemService:
         )
         if not cleaned:
             raise ValueError("至少要留一个称呼。")
+        self._reject_relation_labels(cleaned)
         if cleaned == list(person.names):
             return person
         conflict = next(

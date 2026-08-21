@@ -26,6 +26,8 @@ from ..you.safety import (
 __all__ = [
     "contains_forbidden_subject",
     "describes_relationship",
+    "is_relation_label",
+    "strip_cognitive_frames",
     "is_atomic_value",
     "leaks_protected_text",
     "normalize_for_leak_check",
@@ -84,6 +86,40 @@ _COGNITIVE_FRAME = re.compile(
     r"|in\s+my\s+(?:view|opinion|impression|experience))",
     re.IGNORECASE,
 )
+
+
+# 关系称谓。人类登记一个人时把这些当名字用，等于用称呼把关系写进了记忆——
+# 而「老公」这个名字会跟着每一次浮现进模型的上下文，比留言里写一句更持久。
+#
+# 只拦**整个称呼就是一个关系词**的情况：「老公」「我妈」拦，
+# 「张老师」「李阿姨」放行——那是真的在叫人，不是在定义关系。
+_RELATION_LABELS = frozenset(
+    """
+    老公 老婆 丈夫 妻子 爱人 内人 先生 太太 男人 女人
+    爸 妈 爸爸 妈妈 父亲 母亲 爹 娘 儿子 女儿 孩子
+    哥 姐 弟 妹 哥哥 姐姐 弟弟 妹妹 爷爷 奶奶 外公 外婆 姥姥 姥爷
+    叔叔 阿姨 舅舅 姑姑 伯伯 婆婆 公公 岳父 岳母 儿媳 女婿 嫂子
+    男朋友 女朋友 对象 男友 女友 前任 前男友 前女友 未婚夫 未婚妻
+    老板 领导 上司 下属 上级 下级 同事 同学 室友 邻居 房东
+    老师 学生 导师 徒弟 师父 师傅 教练 客户 甲方 乙方
+    朋友 好friend 闺蜜 兄弟 姐妹 死党 熟人 同伴 搭档 伙伴 战友
+    boss manager colleague partner friend wife husband mom dad
+    """.split()
+)
+
+
+def is_relation_label(name: object) -> bool:
+    """这个称呼本身就是一段关系定义吗？
+
+    去掉「我」「我的」这类前缀之后如果整个就是一个关系词，那就是——
+    「我老公」「老公」都是在说「他和我是什么关系」，不是在叫他。
+    """
+    文本 = str(name or "").strip()
+    for 前缀 in ("我的", "我", "咱的", "咱", "他的", "她的"):
+        if 文本.startswith(前缀) and len(文本) > len(前缀):
+            文本 = 文本[len(前缀):].strip()
+            break
+    return 文本.lower() in _RELATION_LABELS
 
 
 def strip_cognitive_frames(text: str) -> str:
