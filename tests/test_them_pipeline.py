@@ -659,6 +659,54 @@ class TestQuota:
         assert claim.id in message  # 摆出 id，模型才能 delete 掉
 
     @pytest.mark.asyncio
+    async def test_重申已生效的那条不算重复占额(self, tmp_path):
+        """配额算的是「写完之后有多少」，不是「现在有多少 + 又来一份」。
+
+        重申时 `_upsert` 更新原条目而不是新增，净增长为零。原先却把 incoming
+        无条件加到 used 上，而 used 里已经含着那条自己——同一份内容算两遍。
+        后果是一条认识只要超过配额的一半就再也重申不了（真机：68/120 的占用，
+        重申一个字没改的同一条被拒），而重申恰恰是维持它有效的必需动作。
+        """
+        service, _ = _enabled(tmp_path)
+        service.config.setdefault("them", {})["max_tokens_per_person"] = 120
+        长句 = "她在评审里会把每个假设单独列出来再逐条问依据，" * 2
+        claim, _ = await _write(
+            service, content=长句, concept_key="review_style", concept_value="v"
+        )
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            _age_receipts(service, claim)
+            claim, _ = await _write(
+                service, content=长句, concept_key="review_style", concept_value="v"
+            )
+        assert claim.lifecycle == "formal"
+
+        _age_receipts(service, claim)
+        again, _ = await _write(
+            service, content=长句, concept_key="review_style", concept_value="v"
+        )
+        assert again.id == claim.id, "重申应该更新原条目，不是新增一条"
+
+    @pytest.mark.asyncio
+    async def test_别的概念仍然照常受配额约束(self, tmp_path):
+        """放宽的只有「重申自己」那一种情况，不是把闸拆了。"""
+        service, _ = _enabled(tmp_path)
+        service.config.setdefault("them", {})["max_tokens_per_person"] = 120
+        长句 = "她在评审里会把每个假设单独列出来再逐条问依据，" * 2
+        claim, _ = await _write(
+            service, content=长句, concept_key="review_style", concept_value="v"
+        )
+        for _ in range(REQUIRED_CONFIRMATIONS - 1):
+            _age_receipts(service, claim)
+            claim, _ = await _write(
+                service, content=长句, concept_key="review_style", concept_value="v"
+            )
+        with pytest.raises(ValueError, match="已经满了"):
+            await _write(
+                service, content=长句 + "另一件事。",
+                concept_key="another_trait", concept_value="v",
+            )
+
+    @pytest.mark.asyncio
     async def test_候选不占配额(self, tmp_path):
         """候选还没真正落库，占位就等于让不算数的东西挤掉算数的。"""
         service, _ = _enabled(tmp_path, them={"max_tokens_per_person": 200})

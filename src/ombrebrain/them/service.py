@@ -440,7 +440,13 @@ class ThemService:
             protected_texts=protected_texts,
         )
 
-        over, report = self._quota_report(scope, person, incoming=normalized["content"])
+        over, report = self._quota_report(
+            scope,
+            person,
+            incoming=normalized["content"],
+            concept_key=normalized["concept_key"],
+            concept_value=normalized["concept_value"],
+        )
         if over:
             raise ValueError(report)
 
@@ -727,7 +733,13 @@ class ThemService:
     # --- 配额 ---
 
     def _quota_report(
-        self, scope: Scope, person: Person, *, incoming: str
+        self,
+        scope: Scope,
+        person: Person,
+        *,
+        incoming: str,
+        concept_key: str = "",
+        concept_value: str = "",
     ) -> tuple[bool, str]:
         """超了没有？超了就把该压的材料摆出来，但不替它压。
 
@@ -740,7 +752,24 @@ class ThemService:
             for claim in self.store.list_claims(scope, person_id=person.id)
             if claim.lifecycle == "formal"
         ]
-        used = count_tokens_approx("\n".join(claim.content for claim in formal))
+        # 配额要算的是「写完之后有多少」，不是「现在有多少 + 又来一份」。
+        #
+        # 重申一条已经生效的认识时，`_upsert` 会更新原条目而不是新增一条，
+        # 净增长是零。可这里原本把 incoming 无条件加到 used 上，而 used 里
+        # 已经含着那条自己——同一份内容被算了两遍。后果是一条认识只要超过
+        # 配额的一半，就再也重申不了（真机：68/120 的占用，重申一个字没改的
+        # 同一条被拒），而重申恰恰是维持它有效的必需动作。
+        被替换的 = next(
+            (
+                claim
+                for claim in formal
+                if claim.concept_key == concept_key
+                and claim.concept_value == concept_value
+            ),
+            None,
+        )
+        留存 = [claim for claim in formal if claim is not 被替换的]
+        used = count_tokens_approx("\n".join(claim.content for claim in 留存))
         if used + count_tokens_approx(incoming) <= limit:
             return False, ""
 
