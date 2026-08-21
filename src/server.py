@@ -1069,7 +1069,20 @@ async def letter_write(
     lock_type: Optional[str] = "none",
     unlock_date: Optional[str] = "",
 ) -> str:
-    """写入一封信。author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。信件原文永久保存,不压缩/不合并/不衰减,仅建向量索引;普通 breath 不返回,SessionStart 钩子会带上双方各最新一封。"""
+    """写下一封信。**想留给对方、或留给以后的自己的话,写在这里**,不要写成普通记忆——
+信件原文永久保存,不压缩、不合并、不衰减。
+
+author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;
+user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。
+
+**锁**(要「过一段时间才能打开」时才用,默认不锁):
+  lock_type=\"none\"       不锁,写完双方都能读(默认)
+  lock_type=\"timed\"      到期才能打开,**必须同时给 unlock_date**,且必须是未来
+                           unlock_date 写日期(2027-01-01)或完整时刻(2027-01-01T09:00:00+08:00)
+  lock_type=\"permanent\"  永久封存,谁都读不到正文
+锁只有写信的这一方能改(letter_lock_update),另一方连正文都看不到。
+
+普通 breath 不返回信件;SessionStart 钩子会带上双方各最新一封。"""
     return await _with_notice(
         _t_plan.letter_write(
             author=author, content=content, user_name=user_name,
@@ -1092,7 +1105,14 @@ async def letter_lock_update(
     lock_type: str,
     unlock_date: Optional[str] = "",
 ) -> str:
-    """只修改既有 Letter 的锁元数据。仅锁拥有者可操作；不编辑标题、正文、署名或创建时间。"""
+    """改一封已有信件的锁。**只动锁,不动标题、正文、署名和创建时间。**
+
+letter_id 从 letter_read 的返回里取——每封信开头方括号里那串就是(如 [a0102c0f44e2])。
+
+lock_type=\"none\" 解锁 / \"timed\" 到期打开(必须同时给未来的 unlock_date,
+写日期 2027-01-01 或完整时刻 2027-01-01T09:00:00+08:00) / \"permanent\" 永久封存。
+
+**只有写这封信的一方能改自己的锁**:你改不了用户写的那封,用户也改不了你的。"""
     return await _with_notice(
         _t_plan.letter_lock_update(
             letter_id=letter_id,
