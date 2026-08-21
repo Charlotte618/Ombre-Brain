@@ -45,9 +45,37 @@ def _save_github_config_to_disk(gh_cfg: dict) -> None:
     atomic_update_config_yaml(lambda save_config: save_config.__setitem__("github_sync", gh_cfg))
 
 
+def _should_back_up_before_import(relative_path: str) -> bool:
+    """这个文件会被 GitHub 导入覆盖吗？会，就必须先备份。
+
+    判据只有一条：**导入会写它。** 导入写四类东西——
+    Markdown、`_sources/` 下的原文证据、以及 `.you` / `.them` 两个模块库
+    （见 `github_sync` 的安装循环与 `_MODULE_SNAPSHOT_PATHS`）。
+
+    原先这里只打包 `*.md`。于是导入中途失败时，调用方拿着一个自称
+    「导入前备份」的 zip，里面却没有原文证据、也没有两个模块的库——
+    而那三样已经被覆盖了。上层还会因为备份失败就中止导入、理由写着
+    「为避免覆盖后无法找回记忆」，也就是说它**把这个 zip 当成了完整回滚点**。
+    一个不完整的回滚点比没有回滚点更危险：人会依着它去做不可逆的操作。
+    """
+    normalized = relative_path.replace(os.sep, "/")
+    if normalized.endswith(".md"):
+        return True
+    if normalized.startswith("_sources/"):
+        return True
+    # SQLite 的 -wal / -shm 必须跟主库一起备份：只还原主库而丢掉 WAL，
+    # 恢复出来的是一个状态不自洽的库。
+    for module_path in (".you/you.sqlite3", ".them/them.sqlite3"):
+        if normalized == module_path or normalized.startswith(module_path + "-"):
+            return True
+    return False
+
+
 def _pre_import_backup(buckets_dir: str) -> str:
-    """导入前把当前所有 .md 打成 zip 存到 <buckets_dir>/.import_backups/。
-    返回 zip 路径（失败返回 "" —— 备份失败不应阻断恢复，但会在结果里如实标注）。"""
+    """导入前把**所有会被导入覆盖的文件**打成 zip 存到 <buckets_dir>/.import_backups/。
+
+    返回 zip 路径（失败返回 "" —— 备份失败不应阻断恢复，但会在结果里如实标注）。
+    """
     try:
         bdir = os.path.join(buckets_dir, ".import_backups")
         os.makedirs(bdir, exist_ok=True)
@@ -59,9 +87,10 @@ def _pre_import_backup(buckets_dir: str) -> str:
                 if os.path.basename(root) == ".import_backups":
                     continue
                 for fn in files:
-                    if fn.endswith(".md"):
-                        full = os.path.join(root, fn)
-                        z.write(full, os.path.relpath(full, buckets_dir))
+                    full = os.path.join(root, fn)
+                    relative = os.path.relpath(full, buckets_dir)
+                    if _should_back_up_before_import(relative):
+                        z.write(full, relative)
         return zpath
     except Exception as e:
         logger.warning(f"[github] pre-import backup failed: {e}")
