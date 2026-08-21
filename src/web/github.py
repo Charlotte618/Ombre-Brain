@@ -71,6 +71,56 @@ def _should_back_up_before_import(relative_path: str) -> bool:
     return False
 
 
+def _rollback_from_backup(buckets_dir: str, backup_zip: str) -> dict:
+    """导入失败后，把备份里的文件写回原位。
+
+    ## 为什么需要它
+
+    导入是一个文件一个文件装的：装到第 50 个失败，前 49 个已经落盘，
+    原先只是把失败计进 `errors` 就返回 `ok: false`。于是本地变成
+    「一半是远端的、一半是旧的」——而调用方看到的只是一句失败，
+    很容易以为什么都没发生。
+
+    ## 它不做什么
+
+    **不删除本次导入新增的文件。** 那些文件导入前不存在，按理也该清掉才算
+    回到原状，但「删掉本地某个文件」这个动作一旦判断错就不可逆，
+    而判断依据（它到底是这次导入带来的，还是导入期间模型自己写下的）
+    并不可靠。所以这里只还原被覆盖的，新增的原样留着并如实报告数量，
+    由人来决定——**宁可留下多余的，不可删错一条记忆。**
+    """
+    还原 = 0
+    失败: list[str] = []
+    try:
+        with zipfile.ZipFile(backup_zip) as z:
+            成员 = [n for n in z.namelist() if not n.endswith("/")]
+            for name in 成员:
+                目标 = os.path.abspath(os.path.join(buckets_dir, name))
+                # 防目录穿越：备份是本地生成的，但它也可能被人动过手脚
+                if not 目标.startswith(os.path.abspath(buckets_dir) + os.sep):
+                    失败.append(f"{name}: 路径越界")
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(目标), exist_ok=True)
+                    with z.open(name) as src, open(目标, "wb") as dst:
+                        dst.write(src.read())
+                    还原 += 1
+                except Exception as exc:
+                    失败.append(f"{name}: {type(exc).__name__}")
+    except Exception as exc:
+        logger.error(f"[github] rollback failed to open backup: {exc}")
+        return {"ok": False, "restored": 还原, "error": f"备份读不开：{type(exc).__name__}"}
+
+    if 失败:
+        logger.error(f"[github] rollback incomplete: {len(失败)} file(s) failed")
+    return {
+        "ok": not 失败,
+        "restored": 还原,
+        "failed": 失败[:10],
+        "failed_count": len(失败),
+    }
+
+
 def _pre_import_backup(buckets_dir: str) -> str:
     """导入前把**所有会被导入覆盖的文件**打成 zip 存到 <buckets_dir>/.import_backups/。
 
@@ -323,6 +373,26 @@ def register(mcp) -> None:
                 }, status_code=409)
             # 2) 从 GitHub 拉回。GitHubSync 内部再与定时 sync 共用同一把锁。
             result = await sh.github_sync_instance.import_from_github(buckets_dir)
+            # 导入不是事务：失败时前面已经装进去的文件仍留在磁盘上。
+            # 有备份就按备份还原，让「失败」真的等于「什么都没变」。
+            if not result.get("ok") and backup:
+                回滚 = _rollback_from_backup(buckets_dir, backup)
+                result["rolled_back"] = 回滚
+                if 回滚.get("ok"):
+                    result["error"] = (
+                        f"{result.get('error') or '导入失败'}；"
+                        f"已按导入前的备份还原本地（{回滚['restored']} 个文件）。"
+                        "本次导入若新增过文件，不会被删除。"
+                    )
+                else:
+                    # 回滚也失败——这是最坏的一档，必须说得明明白白，
+                    # 绝不能因为「我们尝试过回滚」就把它说成已经恢复。
+                    result["error"] = (
+                        f"{result.get('error') or '导入失败'}；"
+                        f"**自动还原没有完成**（成功 {回滚['restored']} 个，"
+                        f"失败 {回滚.get('failed_count', 0)} 个）。"
+                        f"本地目前可能是新旧混合状态，请用备份手动恢复：{backup}"
+                    )
             if result.pop("you_restored", False):
                 try:
                     state = sh.you_service.status()

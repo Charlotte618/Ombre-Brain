@@ -60,3 +60,60 @@ def test_真打出来的zip里四类文件都在(tmp_path):
     for 相对路径 in 被导入覆盖的:
         assert 相对路径 in 打包了, f"{相对路径} 没进备份"
     assert "embeddings.db" not in 打包了
+
+
+# --- 回滚 ---
+
+from web.github import _rollback_from_backup
+
+
+def test_失败后能把被覆盖的文件还原回去(tmp_path):
+    """导入是一个文件一个文件装的，装到一半失败，前面的已经落盘。
+
+    没有回滚时，本地就停在「一半远端、一半本地」的混合状态，
+    而调用方只看到一句「失败」，很容易以为什么都没发生。
+    """
+    原始 = {
+        "2026/08/a.md": b"local-a",
+        "_sources/ref1.source": b"local-source",
+        ".you/you.sqlite3": b"local-you-db",
+    }
+    for 相对路径, 内容 in 原始.items():
+        目标 = tmp_path / 相对路径
+        目标.parent.mkdir(parents=True, exist_ok=True)
+        目标.write_bytes(内容)
+
+    备份 = _pre_import_backup(str(tmp_path))
+    assert 备份
+
+    # 模拟导入装到一半：前两个被远端内容覆盖，第三个还没轮到
+    (tmp_path / "2026/08/a.md").write_bytes(b"REMOTE-a")
+    (tmp_path / "_sources/ref1.source").write_bytes(b"REMOTE-source")
+    # 导入还新增了一个本地原本没有的文件
+    新增 = tmp_path / "2026/08/from_remote.md"
+    新增.write_bytes(b"REMOTE-new")
+
+    结果 = _rollback_from_backup(str(tmp_path), 备份)
+
+    assert 结果["ok"], 结果
+    for 相对路径, 内容 in 原始.items():
+        assert (tmp_path / 相对路径).read_bytes() == 内容, f"{相对路径} 没还原"
+    # 新增的不删——删错一条记忆不可逆，宁可留下多余的
+    assert 新增.exists()
+
+
+def test_备份读不开时如实报错而不是假装还原了(tmp_path):
+    结果 = _rollback_from_backup(str(tmp_path), str(tmp_path / "不存在.zip"))
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert "备份读不开" in 结果["error"]
+
+
+def test_备份里的越界路径不会被写出去(tmp_path):
+    """备份是本地生成的，但它也可能被人动过手脚。"""
+    坏包 = tmp_path / "bad.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("../../escaped.md", "x")
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+    assert 结果["ok"] is False
+    assert not (tmp_path.parent.parent / "escaped.md").exists()
