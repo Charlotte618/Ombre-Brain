@@ -507,9 +507,14 @@ class ThemStore:
                 connection = self._connect()
                 try:
                     check = connection.execute("PRAGMA quick_check").fetchone()
+                    # 表名来自下面这个**字面量元组**，不接受任何外部输入，
+                    # 没有注入面。改动这里之前先确认这一点仍然成立——
+                    # 一旦表名变成参数，这行 nosec 就会掩盖一个真的注入口。
                     counts = {
                         table: int(
-                            connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                            connection.execute(
+                                f"SELECT COUNT(*) FROM {table}"  # nosec B608
+                            ).fetchone()[0]
                         )
                         for table in ("persons", "claims")
                     }
