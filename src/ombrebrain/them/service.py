@@ -149,10 +149,25 @@ class ThemService:
         cleaned = [name for name in cleaned if name]
         if not cleaned:
             raise ValueError("要写关于谁的认识，至少给一个名字（names）。")
+        # 先把 cleaned 里每个名字命中的人收齐，再判断。
+        #
+        # 上一版是边遍历边决定，**第一个命中就 return**：names 里先出现一个
+        # 模型自己遇到的人，后面那个人类登记的同名者根本走不到下面那道闸，
+        # 会被静默并进前者。真机复现出来是
+        #     model  ['Zoey', '张三']    ← 人类登记的「张三」被并了进来
+        #     human  ['张三']
+        # 两个人共用一个称呼——正是这道闸要挡的东西，却从旁边绕过去了。
+        命中: list[Person] = []
         for name in cleaned:
             existing = self.store.find_person_by_name(scope, name)
             if existing is None:
                 continue
+            if not any(other.id == existing.id for other in 命中):
+                命中.append(existing)
+
+        # 撞上人类登记的人：优先报这一条。两类的区别是「怎么认识的」，
+        # 比「碰巧同名」重要得多，错误信息也更能指导下一步怎么写。
+        for existing in 命中:
             if existing.human_visible:
                 # **跨类同名不自动合并。**
                 #
@@ -172,6 +187,22 @@ class ThemService:
                     f"是 → 带上 person_id=\"{existing.id}\" 再写一次。\n"
                     "不是 → 换一个能区分的称呼，别让两个人共用一个名字。"
                 )
+        # 一次写入命中两个**已经存在**的人：同样不合并。
+        # 「是不是同一个人」是判断，不是字符串比对——这条对同类一样成立。
+        # 真要合并，带 person_id 明说，别让一次顺手的写入把两份认识搅在一起。
+        if len(命中) > 1:
+            清单 = "、".join(
+                f"{'、'.join(p.names)}（person_id={p.id}）" for p in 命中
+            )
+            raise ValueError(
+                f"这些称呼分别指向两个已经存在的人：{清单}。\n"
+                "他们是同一个人吗？\n"
+                "是 → 带上其中一个 person_id 再写一次。\n"
+                "不是 → 这一条只写其中一个人，别把两份认识并到一起。"
+            )
+
+        if 命中:
+            existing = 命中[0]
             # 同为它自己遇到的人：把这次带来的新称呼并进去，下次换个叫法也认得出。
             merged = list(dict.fromkeys([*existing.names, *cleaned]))
             if merged != list(existing.names):

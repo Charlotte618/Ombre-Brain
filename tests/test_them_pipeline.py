@@ -459,6 +459,47 @@ class TestPersons:
             await _write(service)             # 模型自己遇到的那个
 
     @pytest.mark.asyncio
+    async def test_名字列表里混进人类登记的人同样挡得住(self, tmp_path):
+        """闸不能只看 names 里的第一个名字。
+
+        上一版的循环在**第一个命中**就 return 了：names 里先出现一个模型
+        自己遇到的人，后面那个人类登记的同名者根本走不到那道闸，会被静默
+        并进前者。真机复现出来的名册是：
+
+            model  ['Zoey', '张三']    ← 人类登记的「张三」被并了进来
+            human  ['张三']
+
+        两个人共用一个称呼，之后按名字解析命中谁取决于返回顺序——
+        这正是那道闸本来要挡的张冠李戴。
+        """
+        service, _ = _enabled(tmp_path)
+        人 = service.add_person(["张三"])
+        await _write(service, names=["Zoey"])
+        with pytest.raises(ValueError, match="同一个人吗"):
+            await _write(service, names=["Zoey", "张三"])
+        名册 = {p["origin"]: p["names"] for p in service.list_people()}
+        assert 名册["model"] == ["Zoey"], "模型那个人不该被塞进别人的称呼"
+        assert 名册["human"] == ["张三"]
+        assert 人.id == [
+            p["person_id"] for p in service.list_people() if p["origin"] == "human"
+        ][0]
+
+    @pytest.mark.asyncio
+    async def test_一次写入不把两个已有的人并成一个(self, tmp_path):
+        """同为模型自己遇到的人，也不能因为写在同一个 names 里就合并。
+
+        「是不是同一个人」是判断，不是字符串比对——这条对同类一样成立。
+        真要合并，带 person_id 明说。
+        """
+        service, _ = _enabled(tmp_path)
+        第一个, _ = await _write(service, names=["Zoey"])
+        service.store.put_person(
+            service.status().scope, Person.new(["老陈"])
+        )
+        with pytest.raises(ValueError, match="两个已经存在的人|同一个人吗"):
+            await _write(service, names=["Zoey", "老陈"])
+
+    @pytest.mark.asyncio
     async def test_认下来就带person_id写(self, tmp_path):
         """挡下来不是不让写，是让模型自己判断。认，就带 id 再来一次。"""
         service, _ = _enabled(tmp_path)
