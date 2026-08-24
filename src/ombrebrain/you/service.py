@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import asyncio
 import hashlib
 import logging
 import re
@@ -146,6 +147,12 @@ class YouService:
         self.dehydrator = dehydrator
         self.source_store = source_store
         self.logger = logger or logging.getLogger("ombre_brain.you")
+        # 「写 claim → 读全部 claims → 写 projection」这三步必须连着做完。
+        # 中间被另一路插进来，后完成的那一方会拿着自己那份旧快照覆盖新投影：
+        # 真源有 2 条认识，投影里只剩 1 条，而 put_projection 是按 scope
+        # 无条件 upsert，revision 也拦不住（两边算出来的 projection_revision
+        # 可能相同，差别只在 claim 数量）。
+        self._projection_lock = asyncio.Lock()
 
     def status(self) -> ModuleState:
         try:
@@ -292,8 +299,11 @@ class YouService:
                 "且不能落在禁止主题里，也不能照抄记忆原文。"
             )
 
-        claim = self._upsert_observation(scope, normalized, edges)
-        await self.rebuild_projection(scope)
+        # 写入与重建必须原子：中间放另一路进来，它读到的 claims 快照会漏掉
+        # 这一条，而后完成的那一方会把自己的旧快照当成最新投影发布出去。
+        async with self._projection_lock:
+            claim = self._upsert_observation(scope, normalized, edges)
+            self._rebuild_projection_locked(scope)
 
         if claim.lifecycle == "formal":
             return claim, f"记下了。这条已经生效：{claim.content}"
@@ -498,6 +508,13 @@ class YouService:
         return self.store.put_claim(promoted, expected_revision=claim.revision)
 
     async def rebuild_projection(self, scope: Scope) -> dict[str, Any]:
+        """单独重建投影。写完 claim 紧接着重建的路径不要走这里——
+        那种情况要把两步一起放进 _projection_lock，见 write()。"""
+        async with self._projection_lock:
+            return self._rebuild_projection_locked(scope)
+
+    def _rebuild_projection_locked(self, scope: Scope) -> dict[str, Any]:
+        """调用方必须已经持有 _projection_lock。"""
         claims = self.store.list_claims(scope, callable_only=True)
         projection_revision = max((claim.revision for claim in claims), default=0)
         payload = {
@@ -608,17 +625,19 @@ class YouService:
         claim = self.store.get_claim(state.scope, str(claim_id or "").strip())
         if claim is None:
             raise ValueError(f"没有这条 you：{claim_id}")
-        self.store.put_claim(
-            replace(
-                claim,
-                lifecycle="expired",
-                review_state="pending",
-                valid_until=utc_now(),
-                needs_recompute=False,
-            ),
-            expected_revision=claim.revision,
-        )
-        await self.rebuild_projection(state.scope)
+        # 撤回同样是「改 claim → 重建投影」，与 write() 一个道理。
+        async with self._projection_lock:
+            self.store.put_claim(
+                replace(
+                    claim,
+                    lifecycle="expired",
+                    review_state="pending",
+                    valid_until=utc_now(),
+                    needs_recompute=False,
+                ),
+                expected_revision=claim.revision,
+            )
+            self._rebuild_projection_locked(state.scope)
         return f"撤回了：{claim.content}"
 
     @staticmethod
