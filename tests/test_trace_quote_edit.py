@@ -20,6 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from ombrebrain.storage.quote_store import quotes_from_metadata
 from tools.trace import dispatch as trace_dispatch
@@ -78,9 +80,10 @@ async def test_replace_refuses_a_bucket_that_never_had_quotes(bucket_mgr):
     """
     bucket_id = await bucket_mgr.create(content="一条没有引语的普通记忆", importance=5)
 
-    result = await trace_dispatch(bucket_id=bucket_id, quotes_replace=["我不会走的"])
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=bucket_id, quotes_replace=["我不会走的"])
 
-    assert "不能补录" in result
+    assert "不能补录" in str(excinfo.value)
     assert await _quotes_of(bucket_mgr, bucket_id) == []
 
 
@@ -89,11 +92,12 @@ async def test_replace_refuses_to_grow_the_quote_count(bucket_mgr):
     """条数只能持平或减少。多出来的那句不是当时挑的，是现在才决定要记的。"""
     bucket_id = await _quoted(bucket_mgr, ["我不会走的"])
 
-    result = await trace_dispatch(
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(
         bucket_id=bucket_id, quotes_replace=["我不会走的", "你根本不懂"]
-    )
+        )
 
-    assert "不能加" in result
+    assert '不能加' in str(excinfo.value)
     # 拒绝之后必须原封不动——半途写入比整体拒绝更难发现
     assert [q["text"] for q in await _quotes_of(bucket_mgr, bucket_id)] == ["我不会走的"]
 
@@ -179,9 +183,10 @@ async def test_overlong_quote_is_rejected_not_truncated(bucket_mgr):
     """截断过的引语已经不是原话——这个功能的全部意义就在「原样」。"""
     bucket_id = await _quoted(bucket_mgr, ["原来那句"])
 
-    result = await trace_dispatch(bucket_id=bucket_id, quotes_replace=["长" * 101])
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=bucket_id, quotes_replace=["长" * 101])
 
-    assert "100" in result
+    assert "100" in str(excinfo.value)
     assert [q["text"] for q in await _quotes_of(bucket_mgr, bucket_id)] == ["原来那句"]
 
 
@@ -194,11 +199,12 @@ async def test_overlong_quote_is_rejected_not_truncated(bucket_mgr):
 async def test_replace_refuses_to_share_a_call_with_field_updates(bucket_mgr):
     bucket_id = await _quoted(bucket_mgr, ["我不会走的"])
 
-    result = await trace_dispatch(
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(
         bucket_id=bucket_id, quotes_replace=[], importance=9
-    )
+        )
 
-    assert "必须单独调用" in result
+    assert '必须单独调用' in str(excinfo.value)
     # 两边都不能生效
     assert [q["text"] for q in await _quotes_of(bucket_mgr, bucket_id)] == ["我不会走的"]
     bucket = await bucket_mgr.get(bucket_id)
@@ -210,11 +216,12 @@ async def test_replace_refuses_to_share_a_call_with_relation_edit(bucket_mgr):
     bucket_id = await _quoted(bucket_mgr, ["我不会走的"])
     other = await bucket_mgr.create(content="另一条", importance=5)
 
-    result = await trace_dispatch(
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(
         bucket_id=bucket_id, quotes_replace=[], unlink=other
-    )
+        )
 
-    assert "不能与关系修正同时使用" in result
+    assert '不能与关系修正同时使用' in str(excinfo.value)
     assert [q["text"] for q in await _quotes_of(bucket_mgr, bucket_id)] == ["我不会走的"]
 
 
@@ -223,9 +230,10 @@ async def test_non_list_is_rejected(bucket_mgr):
     """字符串是 list 之外最容易误传的类型，且会被逐字符迭代成一堆单字引语。"""
     bucket_id = await _quoted(bucket_mgr, ["我不会走的"])
 
-    result = await trace_dispatch(bucket_id=bucket_id, quotes_replace="我不会走的")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=bucket_id, quotes_replace="我不会走的")
 
-    assert "必须是列表" in result
+    assert '必须是列表' in str(excinfo.value)
     assert [q["text"] for q in await _quotes_of(bucket_mgr, bucket_id)] == ["我不会走的"]
 
 

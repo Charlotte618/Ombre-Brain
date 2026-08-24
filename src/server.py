@@ -196,6 +196,7 @@ try:
         pop_warnings,
         format_warnings_suffix,
         PublicToolError,
+        ToolInputError,
     )
 except ImportError:
     from .errors import (  # type: ignore
@@ -208,6 +209,7 @@ except ImportError:
         pop_warnings,
         format_warnings_suffix,
         PublicToolError,
+        ToolInputError,
     )
 configure_errors_path(config.get("buckets_dir", "buckets"))
 
@@ -579,12 +581,30 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
     3. 异常：捕获后 record OB-E004，响应、持久错误与日志只保留异常类型和
        泛化说明，不能复制异常正文或 traceback。
     4. 任务A：op 非空时，在 entry/ok/err 三处打结构化日志。
+    5. 例外：ToolInputError 原样上抛，见下方注释。
     """
     if op:
         _log_op_entry(op, args or {})
     begin_warnings()
     try:
         result = await coro
+    except ToolInputError as e:
+        # 唯一放行的异常：入参不合法、且工具在任何写入之前就停了。
+        #
+        # 这里必须抛出去而不是转成字符串——MCP 只认异常，把它兜住就等于
+        # 告诉客户端 isError=False，调用方会以为写成功了继续往下走。
+        # 真机复现过：hold(feel=True, domain=...) 返回「domain 固定为 feel」
+        # 却报成功，一个桶都没落库。
+        #
+        # 不记 OB-E004：调用方参数写错不是系统故障，记进去只会淹没真正的错误。
+        # 本次累计的 W/I 提示随失败作废；删除通知不 pop，留给下一次成功调用。
+        if op:
+            _log_op_err(op, e)
+        try:
+            pop_warnings()
+        except Exception:
+            pass
+        raise
     except Exception as e:
         if op:
             _log_op_err(op, e)
@@ -846,6 +866,7 @@ async def grow(
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
+    title: Optional[str] = "",
     domain: Optional[str] = "",
     valence: Optional[float] = -1,
     arousal: Optional[float] = -1,
@@ -884,6 +905,9 @@ async def trace(
     importance=10。protected=1 保护记忆不被衰减，但不作为核心准则强制浮现；
     它与 pinned/anchor 互斥且同样锁定 importance=10。解除最后一层
     pinned/protected 保护时，必须在同一次调用显式传入 importance=1..10。
+    name 改的是桶名（进文件名、做显示回退）；title 改的是这条记忆自己的标题，
+    **信件的标题就存在 title 里**。两个是不同字段，改一个不会动另一个——
+    想改信件标题请用 title，用 name 改不到它。
     digested=1 标记已消化并从默认/被动浮现及 dream 隐藏（对 pinned/permanent/anchor 桶不生效——核心准则与坐标系始终在场，要让某条安静请改用 trace(bucket_id, pinned=0)），
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
@@ -925,7 +949,7 @@ async def trace(
         return f"Deletion request {deletion_request_id} {result['decision']}; bucket {result['bucket_id']}."
     return await _with_notice(
         _t_trace.dispatch(
-            bucket_id=bucket_id, name=name, domain=domain,
+            bucket_id=bucket_id, name=name, title=title, domain=domain,
             valence=valence, arousal=arousal, importance=importance,
             tags=tags, resolved=resolved, pinned=pinned,
             protected=protected, digested=digested,
@@ -941,7 +965,7 @@ async def trace(
         ),
         op="trace",
         args={
-            "bucket_id": bucket_id, "name": name, "domain": domain,
+            "bucket_id": bucket_id, "name": name, "title": title, "domain": domain,
             "valence": valence, "arousal": arousal, "importance": importance,
             "tags": tags, "resolved": resolved, "pinned": pinned,
             "protected": protected, "digested": digested,
@@ -1081,6 +1105,8 @@ user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");tit
                            unlock_date 写日期(2027-01-01)或完整时刻(2027-01-01T09:00:00+08:00)
   lock_type=\"permanent\"  永久封存,谁都读不到正文
 锁只有写信的这一方能改(letter_lock_update),另一方连正文都看不到。
+**想留着以后再上锁,现在就得给 ai_name**(或设好环境变量 AI_NAME):事后上锁要用到
+写信时记下的实际关系名,当时没记下来,`letter_lock_update` 就再也锁不上这封了。
 
 普通 breath 不返回信件;SessionStart 钩子会带上双方各最新一封。"""
     return await _with_notice(

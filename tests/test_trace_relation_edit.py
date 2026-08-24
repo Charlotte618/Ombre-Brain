@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from ombrebrain.storage.relation_store import (
     normalize_relation_links,
@@ -106,9 +108,10 @@ async def test_relink_refuses_to_create_a_relation_that_does_not_exist(bucket_mg
     a = await bucket_mgr.create(content="毫无关系的甲", importance=5)
     b = await bucket_mgr.create(content="毫无关系的乙", importance=5)
 
-    result = await trace_dispatch(bucket_id=a, relink=b, relation_type="same_event")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, relink=b, relation_type="same_event")
 
-    assert "不能凭空建立" in result
+    assert '不能凭空建立' in str(excinfo.value)
     assert await _links_of(bucket_mgr, a) == []
     assert await _links_of(bucket_mgr, b) == []
 
@@ -229,11 +232,12 @@ async def test_relink_to_the_same_type_reports_no_change(bucket_mgr):
 async def test_unlink_and_relink_are_mutually_exclusive(bucket_mgr):
     a, b = await _pair(bucket_mgr)
 
-    result = await trace_dispatch(
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(
         bucket_id=a, unlink=b, relink=b, relation_type="same_event"
-    )
+        )
 
-    assert "不能同时使用" in result
+    assert '不能同时使用' in str(excinfo.value)
     # 拒绝之后关系必须原封不动
     assert (await _links_of(bucket_mgr, a))[0]["type"] == "related_to"
 
@@ -242,9 +246,10 @@ async def test_unlink_and_relink_are_mutually_exclusive(bucket_mgr):
 async def test_relink_without_relation_type_is_rejected(bucket_mgr):
     a, b = await _pair(bucket_mgr)
 
-    result = await trace_dispatch(bucket_id=a, relink=b)
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, relink=b)
 
-    assert "必须同时指定 relation_type" in result
+    assert '必须同时指定 relation_type' in str(excinfo.value)
     assert (await _links_of(bucket_mgr, a))[0]["type"] == "related_to"
 
 
@@ -253,18 +258,20 @@ async def test_relation_type_alone_is_rejected(bucket_mgr):
     """光传类型不说改哪一条，不能静默变成"什么都没做"。"""
     a, _ = await _pair(bucket_mgr)
 
-    result = await trace_dispatch(bucket_id=a, relation_type="same_event")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, relation_type="same_event")
 
-    assert "只能配合 relink 使用" in result
+    assert '只能配合 relink 使用' in str(excinfo.value)
 
 
 @pytest.mark.asyncio
 async def test_custom_type_is_rejected_because_it_needs_a_label(bucket_mgr):
     a, b = await _pair(bucket_mgr)
 
-    result = await trace_dispatch(bucket_id=a, relink=b, relation_type="custom")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, relink=b, relation_type="custom")
 
-    assert "custom" in result
+    assert 'custom' in str(excinfo.value)
     assert (await _links_of(bucket_mgr, a))[0]["type"] == "related_to"
 
 
@@ -272,9 +279,10 @@ async def test_custom_type_is_rejected_because_it_needs_a_label(bucket_mgr):
 async def test_unknown_type_is_rejected(bucket_mgr):
     a, b = await _pair(bucket_mgr)
 
-    result = await trace_dispatch(bucket_id=a, relink=b, relation_type="是同一件事")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, relink=b, relation_type="是同一件事")
 
-    assert "未知的 relation_type" in result
+    assert '未知的 relation_type' in str(excinfo.value)
     assert (await _links_of(bucket_mgr, a))[0]["type"] == "related_to"
 
 
@@ -282,25 +290,29 @@ async def test_unknown_type_is_rejected(bucket_mgr):
 async def test_self_reference_is_rejected(bucket_mgr):
     a = await bucket_mgr.create(content="只有自己", importance=5)
 
-    assert "和它自己" in await trace_dispatch(bucket_id=a, unlink=a)
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, unlink=a)
+    assert '和它自己' in str(excinfo.value)
 
 
 @pytest.mark.asyncio
 async def test_missing_target_bucket_is_rejected(bucket_mgr):
     a = await bucket_mgr.create(content="存在的那条", importance=5)
 
-    result = await trace_dispatch(bucket_id=a, unlink="20990101-not-a-bucket")
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id=a, unlink="20990101-not-a-bucket")
 
-    assert "找不到目标记忆" in result
+    assert '找不到目标记忆' in str(excinfo.value)
 
 
 @pytest.mark.asyncio
 async def test_missing_source_bucket_is_rejected(bucket_mgr):
     b = await bucket_mgr.create(content="存在的那条", importance=5)
 
-    result = await trace_dispatch(bucket_id="20990101-not-a-bucket", unlink=b)
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_dispatch(bucket_id="20990101-not-a-bucket", unlink=b)
 
-    assert "找不到记忆" in result
+    assert '找不到记忆' in str(excinfo.value)
 
 
 @pytest.mark.asyncio

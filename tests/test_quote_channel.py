@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import tools._runtime as rt
+from errors import ToolInputError
 from ombrebrain.storage.quote_store import MAX_QUOTES, MAX_QUOTE_CHARS
 from tools.breath import dispatch as breath_dispatch
 from tools.hold import dispatch as hold_dispatch
@@ -97,22 +98,26 @@ async def test_quote_is_stored_in_metadata_not_in_body(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_overlong_quote_is_rejected_and_nothing_is_written(bucket_mgr):
-    """超限拒绝要**整条调用失败**，不能悄悄存个没有引语的桶。"""
-    _install_runtime(bucket_mgr)
-    out = await hold_dispatch(content=BODY, quotes=["字" * (MAX_QUOTE_CHARS + 1)])
+    """超限拒绝要**整条调用失败**，不能悄悄存个没有引语的桶。
 
-    assert "未创建任何桶" in out
+    「失败」的判据是抛异常而不是返回一句说明：返回字符串在 MCP 侧是
+    isError=False，调用方会把它当成一次成功的写入。
+    """
+    _install_runtime(bucket_mgr)
+    with pytest.raises(ToolInputError, match="未创建任何桶"):
+        await hold_dispatch(content=BODY, quotes=["字" * (MAX_QUOTE_CHARS + 1)])
+
     assert (await bucket_mgr.list_all()) == []
 
 
 @pytest.mark.asyncio
 async def test_too_many_quotes_is_rejected_and_nothing_is_written(bucket_mgr):
     _install_runtime(bucket_mgr)
-    out = await hold_dispatch(
-        content=BODY, quotes=[f"第{i}句" for i in range(MAX_QUOTES + 1)]
-    )
+    with pytest.raises(ToolInputError, match="未创建任何桶"):
+        await hold_dispatch(
+            content=BODY, quotes=[f"第{i}句" for i in range(MAX_QUOTES + 1)]
+        )
 
-    assert "未创建任何桶" in out
     assert (await bucket_mgr.list_all()) == []
 
 

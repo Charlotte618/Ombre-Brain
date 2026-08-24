@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from errors import ToolInputError
 from ombrebrain.storage.relation_store import (
     normalize_relation_links,
     normalize_relation_type,
@@ -36,42 +37,39 @@ _REJECT_CUSTOM = (
 )
 
 
-def validate(bucket_id: str, unlink: str, relink: str, relation_type: str) -> str:
-    """检查参数组合，返回错误短句；空串表示通过。"""
+def validate(bucket_id: str, unlink: str, relink: str, relation_type: str) -> None:
+    """检查参数组合。不合法一律抛 ToolInputError，通过则静默返回。
+
+    为什么不再返回错误短句：返回值会被调用方 return 出去，在 MCP 侧变成一次
+    isError=False 的正常返回——调用方以为关系改好了，实际一个字节都没动。
+    """
     if unlink and relink:
-        return "unlink 与 relink 不能同时使用；本次未修改。"
+        raise ToolInputError("unlink 与 relink 不能同时使用；本次未修改。")
     if relation_type and not relink:
-        return "relation_type 只能配合 relink 使用；本次未修改。"
+        raise ToolInputError("relation_type 只能配合 relink 使用；本次未修改。")
     if relink and not relation_type:
-        return (
-            "relink 必须同时指定 relation_type（caused_by / causes / "
-            "continuation_of / continues / related_to / same_event）；本次未修改。"
-        )
+        raise ToolInputError("relink 必须同时指定 relation_type（caused_by / causes / "
+            "continuation_of / continues / related_to / same_event）；本次未修改。")
     target = unlink or relink
     if target == bucket_id:
-        return "不能把一条记忆和它自己解绑或改写关系；本次未修改。"
+        raise ToolInputError("不能把一条记忆和它自己解绑或改写关系；本次未修改。")
     if relation_type.strip().lower() == "custom":
-        return _REJECT_CUSTOM
+        raise ToolInputError(_REJECT_CUSTOM)
     if relation_type:
         try:
             normalize_relation_type(relation_type)
         except ValueError:
-            return (
-                f"未知的 relation_type「{relation_type}」；只支持 caused_by / causes / "
-                "continuation_of / continues / related_to / same_event。本次未修改。"
-            )
-    return ""
+            raise ToolInputError(f"未知的 relation_type「{relation_type}」；只支持 caused_by / causes / "
+                "continuation_of / continues / related_to / same_event。本次未修改。")
 
 
 async def apply(bucket_id: str, unlink: str, relink: str, relation_type: str) -> str:
     """执行解绑 / 改类型，返回给模型看的中文短句。"""
-    error = validate(bucket_id, unlink, relink, relation_type)
-    if error:
-        return error
+    validate(bucket_id, unlink, relink, relation_type)
 
     target_id = unlink or relink
     if not await rt.bucket_mgr.get(target_id):
-        return f"找不到目标记忆 {target_id}；本次未修改。"
+        raise ToolInputError(f"找不到目标记忆 {target_id}；本次未修改。")
 
     if unlink:
         return await _apply_unlink(bucket_id, target_id)
@@ -103,9 +101,9 @@ async def _apply_unlink(bucket_id: str, target_id: str) -> str:
 
     result = await rt.bucket_mgr.mutate_relation_pair(bucket_id, target_id, _mutation)
     if result == "broken":
-        return "这两条记忆的 relation_links 数据有问题，无法自动修改；本次未修改。"
+        raise ToolInputError("这两条记忆的 relation_links 数据有问题，无法自动修改；本次未修改。")
     if result is None:
-        return "找不到要修改的记忆文件；本次未修改。"
+        raise ToolInputError("找不到要修改的记忆文件；本次未修改。")
     if not result:
         return f"{bucket_id} 与 {target_id} 之间本来就没有关系；本次未修改。"
     rt.logger.info(f"op=trace_relation action=unlink {bucket_id} x {target_id}")
@@ -143,14 +141,12 @@ async def _apply_retype(bucket_id: str, target_id: str, relation_type: str) -> s
 
     result = await rt.bucket_mgr.mutate_relation_pair(bucket_id, target_id, _mutation)
     if result == "broken":
-        return "这两条记忆的 relation_links 数据有问题，无法自动修改；本次未修改。"
+        raise ToolInputError("这两条记忆的 relation_links 数据有问题，无法自动修改；本次未修改。")
     if result == "missing":
-        return (
-            f"{bucket_id} 与 {target_id} 之间没有已存在的关系，relink 只能修改"
-            "已有关系的类型，不能凭空建立；本次未修改。"
-        )
+        raise ToolInputError(f"{bucket_id} 与 {target_id} 之间没有已存在的关系，relink 只能修改"
+            "已有关系的类型，不能凭空建立；本次未修改。")
     if result is None:
-        return "找不到要修改的记忆文件；本次未修改。"
+        raise ToolInputError("找不到要修改的记忆文件；本次未修改。")
     if not result:
         return f"{bucket_id} 与 {target_id} 的关系已经是 {forward}；本次未修改。"
     rt.logger.info(

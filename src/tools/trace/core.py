@@ -41,8 +41,9 @@ import math
 from contextlib import AsyncExitStack
 from typing import Optional
 
+from errors import ToolInputError
 from ombrebrain.domain.memory_messages import resolved_hint
-from utils import parse_bool
+from utils import normalize_memory_title, parse_bool
 from .. import _runtime as rt
 from .._common import (
     _quota_turn,
@@ -58,6 +59,7 @@ from . import _quote_edit, _relation_edit
 async def trace_core(
     bucket_id: str,
     name: Optional[str] = "",
+    title: Optional[str] = "",
     domain: Optional[str] = "",
     valence: Optional[float] = -1,
     arousal: Optional[float] = -1,
@@ -90,6 +92,8 @@ async def trace_core(
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
         name = ""
+    if title is None:
+        title = ""
     if domain is None:
         domain = ""
     if valence is None:
@@ -162,7 +166,7 @@ async def trace_core(
     digested = _safe_int(digested, -1)
     dont_surface = _safe_int(dont_surface, -1)
     if protected not in (-1, 0, 1):
-        return "protected 只能传 -1、0 或 1；本次未修改。"
+        raise ToolInputError("protected 只能传 -1、0 或 1；本次未修改。")
 
     metadata_err = check_metadata_size(
         bucket_id=bucket_id,
@@ -204,7 +208,7 @@ async def trace_core(
     })
 
     if not bucket_id or not bucket_id.strip():
-        return "请提供有效的 bucket_id。"
+        raise ToolInputError("请提供有效的 bucket_id。")
 
     # 关系修正是独立分支：它只动 relation_links，不参与下面的字段收集，
     # 所以在这里就地返回，不和 delete / content 改写等混在一起。
@@ -213,9 +217,9 @@ async def trace_core(
     relation_type = str(relation_type or "").strip()
     if unlink or relink or relation_type:
         if quotes_replace is not None:
-            return "quotes_replace 不能与关系修正同时使用，请分开调用；本次未修改。"
+            raise ToolInputError("quotes_replace 不能与关系修正同时使用，请分开调用；本次未修改。")
         if not await rt.bucket_mgr.get(bucket_id):
-            return f"找不到记忆 {bucket_id}；本次未修改。"
+            raise ToolInputError(f"找不到记忆 {bucket_id}；本次未修改。")
         return await _relation_edit.apply(
             bucket_id.strip(), unlink, relink, relation_type
         )
@@ -227,9 +231,9 @@ async def trace_core(
     # 另外那半个意图被悄悄丢掉，而返回值看起来是成功的。
     if quotes_replace is not None:
         if not isinstance(quotes_replace, list):
-            return "quotes_replace 必须是列表（空列表表示删除全部引语）；本次未修改。"
+            raise ToolInputError("quotes_replace 必须是列表（空列表表示删除全部引语）；本次未修改。")
         if any((
-            bool(name), bool(domain), valence != -1, arousal != -1,
+            bool(name), bool(title), bool(domain), valence != -1, arousal != -1,
             importance != -1, bool(tags), resolved != -1, pinned != -1,
             protected != -1, digested != -1, bool(content), delete, hard_delete,
             restore, bool(status), weight != -1, dont_surface != -1,
@@ -237,10 +241,8 @@ async def trace_core(
             bool(media_append), media_replace is not None, bool(delete_reason),
             bool(old_str), new_str_provided,
         )):
-            return (
-                "quotes_replace 必须单独调用，不能与其他字段更新或删除混在一次 "
-                "trace 里；本次未修改。"
-            )
+            raise ToolInputError("quotes_replace 必须单独调用，不能与其他字段更新或删除混在一次 "
+                "trace 里；本次未修改。")
         return await _quote_edit.apply(bucket_id.strip(), quotes_replace)
 
     if restore or delete or hard_delete:
@@ -256,14 +258,12 @@ async def trace_core(
             and is_letter_bucket(guarded_bucket)
             and letter_lock_state(guarded_bucket, "ai")["locked"]
         ):
-            return "这封信尚未向你开放，不能通过 trace 修改其生命周期。"
+            raise ToolInputError("这封信尚未向你开放，不能通过 trace 修改其生命周期。")
 
     restore_unprotect = bool(restore and protected == 0)
     if restore_unprotect and not (1 <= importance <= 10):
-        return (
-            "恢复归档桶时解除 protected，必须在同一次 trace 中显式传入 "
-            "importance=1..10；本次未恢复、未修改。"
-        )
+        raise ToolInputError("恢复归档桶时解除 protected，必须在同一次 trace 中显式传入 "
+            "importance=1..10；本次未恢复、未修改。")
 
     restore_conflicts = any((
         delete,
@@ -292,14 +292,12 @@ async def trace_core(
         new_str_provided,
     ))
     if restore and restore_conflicts:
-        return (
-            "参数冲突：restore=True 必须单独调用，不能同时删除或修改记忆；"
+        raise ToolInputError("参数冲突：restore=True 必须单独调用，不能同时删除或修改记忆；"
             "唯一例外是用 protected=0 与 importance=1..10 原子解除归档保护。"
-            "本次未恢复、未修改。"
-        )
+            "本次未恢复、未修改。")
     if restore:
         if not guarded_bucket:
-            return f"未找到记忆桶: {bucket_id}"
+            raise ToolInputError(f"未找到记忆桶: {bucket_id}")
         restore_meta = guarded_bucket.get("metadata", {})
         if not isinstance(restore_meta, dict):
             restore_meta = {}
@@ -321,17 +319,13 @@ async def trace_core(
             restore_meta.get("anchor"), default=False
         )
         if restore_unprotect and not restore_protected:
-            return (
-                f"归档记忆桶 {bucket_id} 当前不是 protected；"
-                "请单独使用 restore=True 恢复。本次未恢复、未修改。"
-            )
+            raise ToolInputError(f"归档记忆桶 {bucket_id} 当前不是 protected；"
+                "请单独使用 restore=True 恢复。本次未恢复、未修改。")
         if restore_protected and restore_anchor and not restore_unprotect:
-            return (
-                f"归档记忆桶 {bucket_id} 同时带有 protected 与 anchor，"
+            raise ToolInputError(f"归档记忆桶 {bucket_id} 同时带有 protected 与 anchor，"
                 "不能恢复为冲突的活跃状态。请调用 "
                 "trace(bucket_id, restore=True, protected=0, "
-                "importance=1..10) 原子解除保护并恢复。"
-            )
+                "importance=1..10) 原子解除保护并恢复。")
         final_restore_protected = restore_protected and not restore_unprotect
         try:
             restored_type = rt.bucket_mgr.footprint_snapshot().original_kind(
@@ -380,7 +374,7 @@ async def trace_core(
                 locked_reader = rt.bucket_mgr.get
             locked_bucket = await locked_reader(bucket_id)
             if not locked_bucket:
-                return f"未找到记忆桶: {bucket_id}"
+                raise ToolInputError(f"未找到记忆桶: {bucket_id}")
             locked_meta = locked_bucket.get("metadata", {})
             if not isinstance(locked_meta, dict):
                 locked_meta = {}
@@ -395,7 +389,7 @@ async def trace_core(
                 parse_bool(locked_meta.get("tombstone"), default=False),
             )
             if locked_restore_snapshot != restore_snapshot:
-                return (
+                raise ToolInputError(
                     f"记忆桶 {bucket_id} 在恢复期间已被其他请求更新，"
                     "为避免覆盖或配额误判，请重试。"
                 )
@@ -415,67 +409,55 @@ async def trace_core(
         if result.get("error") == "not_archived":
             return f"记忆桶仍在日常记忆中，无需恢复: {bucket_id}"
         if result.get("error") == "not_found":
-            return f"未找到记忆桶: {bucket_id}"
+            raise ToolInputError(f"未找到记忆桶: {bucket_id}")
         if result.get("error") == "incompatible_protected_anchor":
             return (
                 f"归档记忆桶 {bucket_id} 同时带有 protected 与 anchor，"
                 "请调用 trace(bucket_id, restore=True, protected=0, "
                 "importance=1..10) 原子解除保护并恢复。"
             )
-        return f"恢复记忆桶失败: {result.get('error', 'unknown_error')}"
+        raise ToolInputError(f"恢复记忆桶失败: {result.get('error', 'unknown_error')}")
 
     patch_args_supplied = bool(old_str) or new_str_provided
     if patch_args_supplied and (delete or hard_delete):
-        return (
-            "参数冲突：old_str/new_str 局部替换不能与 delete/hard_delete 同时使用；"
-            "本次未修改、未删除、未归档。"
-        )
+        raise ToolInputError("参数冲突：old_str/new_str 局部替换不能与 delete/hard_delete 同时使用；"
+            "本次未修改、未删除、未归档。")
     if patch_args_supplied and content:
-        return (
-            "参数冲突：不能同时使用 content 完整替换和 old_str/new_str 局部替换；"
-            "本次未修改。"
-        )
+        raise ToolInputError("参数冲突：不能同时使用 content 完整替换和 old_str/new_str 局部替换；"
+            "本次未修改。")
     if patch_args_supplied and (not old_str or not new_str_provided):
-        return (
-            "局部替换必须同时提供 old_str 和 new_str；new_str 可以是空字符串以删除片段。"
-            "本次未修改。"
-        )
+        raise ToolInputError("局部替换必须同时提供 old_str 和 new_str；new_str 可以是空字符串以删除片段。"
+            "本次未修改。")
     if patch_args_supplied and old_str == new_str:
-        return "old_str 与 new_str 完全相同，没有内容需要替换；本次未修改。"
+        raise ToolInputError("old_str 与 new_str 完全相同，没有内容需要替换；本次未修改。")
 
     # --- Delete 模式（F-10：普通记忆只允许软删除/归档）---
     if hard_delete and delete:
-        return (
-            "参数冲突：delete=True 表示归档，hard_delete=True 仅表示清理测试桶，"
-            "两者不能同时使用；本次未删除、未归档。"
-        )
+        raise ToolInputError("参数冲突：delete=True 表示归档，hard_delete=True 仅表示清理测试桶，"
+            "两者不能同时使用；本次未删除、未归档。")
     if hard_delete:
         if not delete_reason:
-            return (
-                "拒绝永久删除：hard_delete 仅用于创建时明确标记为 test_data 的测试桶，"
-                "并且必须提供非空 delete_reason；本次未删除、未归档。"
-            )
+            raise ToolInputError("拒绝永久删除：hard_delete 仅用于创建时明确标记为 test_data 的测试桶，"
+                "并且必须提供非空 delete_reason；本次未删除、未归档。")
         if len(delete_reason) > 500:
-            return "拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。"
+            raise ToolInputError("拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。")
         result = await rt.bucket_mgr.hard_delete_test_bucket(
             bucket_id, reason=delete_reason
         )
         if result.get("ok"):
             return f"已永久删除测试桶: {bucket_id}"
         if result.get("error") == "not_erasable_test_data":
-            return (
-                "拒绝永久删除：普通记忆桶（包括 plan）不可被 trace 物理删除；"
+            raise ToolInputError("拒绝永久删除：普通记忆桶（包括 plan）不可被 trace 物理删除；"
                 "只有创建时明确标记为 test_data 的测试桶可以清理。"
-                "本次未删除、未归档；若只想从日常召回隐藏，请改用 delete=True 归档。"
-            )
+                "本次未删除、未归档；若只想从日常召回隐藏，请改用 delete=True 归档。")
         if result.get("error") == "missing_delete_reason":
-            return "拒绝永久删除：必须提供非空 delete_reason；本次未删除、未归档。"
+            raise ToolInputError("拒绝永久删除：必须提供非空 delete_reason；本次未删除、未归档。")
         if result.get("error") == "delete_reason_too_long":
-            return "拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。"
+            raise ToolInputError("拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。")
         if result.get("error") == "not_found":
-            return f"未找到记忆桶: {bucket_id}；本次未删除、未归档。"
+            raise ToolInputError(f"未找到记忆桶: {bucket_id}；本次未删除、未归档。")
         # 兜底保留原始错误码便于排查，但不能只甩一个英文码给调用方。
-        return f"永久删除失败：{result.get('error', 'unknown_error')}；本次未删除、未归档。"
+        raise ToolInputError(f"永久删除失败：{result.get('error', 'unknown_error')}；本次未删除、未归档。")
 
     if delete:
         success = await rt.bucket_mgr.delete(bucket_id)
@@ -483,7 +465,7 @@ async def trace_core(
 
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
-        return f"未找到记忆桶: {bucket_id}"
+        raise ToolInputError(f"未找到记忆桶: {bucket_id}")
 
     meta = bucket.get("metadata", {})
     current_pinned = parse_bool(meta.get("pinned"), default=False)
@@ -495,7 +477,7 @@ async def trace_core(
         if logical_letter else {}
     )
     if logical_letter and letter_lock_state(bucket, "ai")["locked"]:
-        return "这封信尚未向你开放；请使用 Letter 专用入口管理锁状态。"
+        raise ToolInputError("这封信尚未向你开放；请使用 Letter 专用入口管理锁状态。")
     pin_state_changed = (
         pinned in (0, 1) and bool(pinned) != current_pinned
     )
@@ -503,10 +485,8 @@ async def trace_core(
         protected in (0, 1) and bool(protected) != current_protected
     )
     if logical_letter and (pin_state_changed or protected_state_changed):
-        return (
-            "Letter 不能通过 trace 改变 pinned/protected 状态；"
-            "请使用 Letter 专用入口。"
-        )
+        raise ToolInputError("Letter 不能通过 trace 改变 pinned/protected 状态；"
+            "请使用 Letter 专用入口。")
 
     final_pinned = bool(pinned) if pinned in (0, 1) else current_pinned
     final_protected = (
@@ -515,34 +495,28 @@ async def trace_core(
         else current_protected
     )
     if final_pinned and final_protected:
-        return "pinned 与 protected 互斥，本次未修改。"
+        raise ToolInputError("pinned 与 protected 互斥，本次未修改。")
     if final_protected and current_anchor:
-        return (
-            "protected 与 anchor 互斥；请先用 release() 解除 anchor，"
-            "再保护该记忆桶。本次未修改。"
-        )
+        raise ToolInputError("protected 与 anchor 互斥；请先用 release() 解除 anchor，"
+            "再保护该记忆桶。本次未修改。")
 
     leaving_last_guard = (
         (current_pinned or current_protected)
         and not (final_pinned or final_protected)
     )
     if leaving_last_guard and not (1 <= importance <= 10):
-        return (
-            f"解除记忆桶 {bucket_id} 最后一层 pinned/protected 保护时，"
+        raise ToolInputError(f"解除记忆桶 {bucket_id} 最后一层 pinned/protected 保护时，"
             "必须在同一次 trace "
-            "中显式传入 importance=1..10。本次未修改。"
-        )
+            "中显式传入 importance=1..10。本次未修改。")
 
     if (
         1 <= importance <= 10
         and (final_pinned or final_protected)
         and not (pin_state_changed or protected_state_changed)
     ):
-        return (
-            f"记忆桶 {bucket_id} 是 pinned/受保护桶，importance 被锁定为 10，"
+        raise ToolInputError(f"记忆桶 {bucket_id} 是 pinned/受保护桶，importance 被锁定为 10，"
             "本次未修改。解除最后一层保护时请在同一次"
-            "调用传入 importance=1..10。"
-        )
+            "调用传入 importance=1..10。")
 
     # 配额判定 + 落盘必须在同一把锁里：check_pinned_quota/check_protected_quota
     # 到最终 bucket_mgr.update() 之间隔着别的字段处理和一次 await，两个并发 trace()
@@ -575,7 +549,7 @@ async def trace_core(
         if need_pinned_lock or need_protected_lock:
             locked_bucket = await rt.bucket_mgr.get(bucket_id)
             if not locked_bucket:
-                return f"未找到记忆桶: {bucket_id}"
+                raise ToolInputError(f"未找到记忆桶: {bucket_id}")
             locked_meta = locked_bucket.get("metadata", {})
             locked_snapshot = (
                 parse_bool(locked_meta.get("pinned"), default=False),
@@ -594,7 +568,7 @@ async def trace_core(
                 current_anchor,
             )
             if locked_snapshot != original_snapshot:
-                return (
+                raise ToolInputError(
                     f"记忆桶 {bucket_id} 在本次修改期间已被其他请求更新，"
                     "为避免覆盖或配额误判，请重试。"
                 )
@@ -602,6 +576,13 @@ async def trace_core(
         updates: dict = {}
         if name:
             updates["name"] = name
+        if title:
+            # name 是桶名，title 是这条记忆自己的标题（信件标题就存在这里）。
+            # 两个字段各走各的，改一个不该动另一个。
+            try:
+                updates["title"] = normalize_memory_title(title)
+            except ValueError as exc:
+                raise ToolInputError(str(exc)) from exc
         if domain:
             updates["domain"] = [d.strip() for d in domain.split(",") if d.strip()]
         if 0 <= valence <= 1:
@@ -620,7 +601,8 @@ async def trace_core(
                 if pinning_now:
                     err = await check_pinned_quota()
                     if err:
-                        return err
+                        # 配额满 = 这次没钉上，桶原样不动。
+                        raise ToolInputError(err)
                 updates["importance"] = 10
         if protected in (0, 1):
             updates["protected"] = bool(protected)
@@ -628,14 +610,14 @@ async def trace_core(
                 if protecting_now:
                     err = await check_protected_quota()
                     if err:
-                        return err
+                        raise ToolInputError(err)
                 updates["importance"] = 10
         if digested in (0, 1):
             updates["digested"] = bool(digested)
         if content:
             size_err = check_content_size(content)
             if size_err:
-                return size_err
+                raise ToolInputError(size_err)
             updates["content"] = content
         if status:
             s = status.strip().lower()
@@ -662,7 +644,9 @@ async def trace_core(
             updates["media"] = media_replace
 
         if not updates and not patch_args_supplied:
-            return "没有任何字段需要修改。"
+            # trace 是写工具：调它就是有改的意图。一个字段都没落到 updates 上，
+            # 意味着那个意图整个落空了，不能报成一次正常返回。
+            raise ToolInputError("没有任何字段需要修改。")
 
         # --- plan 桶：status / content 改变时追加 change_log ---
         content_change_requested = "content" in updates or patch_args_supplied
@@ -706,24 +690,22 @@ async def trace_core(
             if not patch_result.get("ok"):
                 patch_error = patch_result.get("error")
                 if patch_error == "not_found":
-                    return f"未找到记忆桶: {bucket_id}"
+                    raise ToolInputError(f"未找到记忆桶: {bucket_id}")
                 if patch_error == "old_str_not_found":
-                    return (
-                        "未找到 old_str，正文未修改。请从 Dashboard 或对应记忆类型的读取入口"
+                    raise ToolInputError("未找到 old_str，正文未修改。请从 Dashboard 或对应记忆类型的读取入口"
                         "核对当前原文；普通记忆也可用 "
                         f'breath_advanced(query="{bucket_id}", max_results=1, '
-                        "max_tokens=20000) 按完整 bucket_id 读取。复制连续且逐字一致的片段后重试。"
-                    )
+                        "max_tokens=20000) 按完整 bucket_id 读取。复制连续且逐字一致的片段后重试。")
                 if patch_error == "old_str_ambiguous":
-                    return (
-                        "old_str 在正文中至少出现 2 次，"
-                        "无法安全确定要修改哪一处；正文未修改。请提供更长且唯一的原文片段。"
-                    )
+                    raise ToolInputError("old_str 在正文中至少出现 2 次，"
+                        "无法安全确定要修改哪一处；正文未修改。请提供更长且唯一的原文片段。")
                 if patch_error == "invalid_content":
-                    return str(patch_result.get("message") or "替换后的内容不符合存储限制。")
+                    raise ToolInputError(
+                        str(patch_result.get("message") or "替换后的内容不符合存储限制。")
+                    )
                 if patch_error == "unchanged":
-                    return "old_str 与 new_str 替换后正文没有变化；本次未修改。"
-                return f"修改失败: {bucket_id}"
+                    raise ToolInputError("old_str 与 new_str 替换后正文没有变化；本次未修改。")
+                raise ToolInputError(f"修改失败: {bucket_id}")
         else:
             success = await rt.bucket_mgr.update(
                 bucket_id,
@@ -732,7 +714,7 @@ async def trace_core(
                 **updates,
             )
             if not success:
-                return f"修改失败: {bucket_id}"
+                raise ToolInputError(f"修改失败: {bucket_id}")
 
     # 注意：完整正文更新和局部替换都会在 BucketManager 内先提交 Markdown，
     # 释放桶租约后再投递 embedding outbox。这里不需要、也不应该重复调用

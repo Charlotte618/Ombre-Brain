@@ -31,6 +31,7 @@ frontmatter。但只给了写入口，没给修正口——记错了、写错字
 
 from __future__ import annotations
 
+from errors import ToolInputError
 from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 
@@ -44,47 +45,46 @@ _REJECT_EMPTY = (
 )
 
 
-def _reject_growth(before: int, after: int) -> str:
-    return (
-        f"这条记忆现在有 {before} 条引语，quotes_replace 给了 {after} 条。"
+def _reject_growth(before: int, after: int) -> None:
+    raise ToolInputError(f"这条记忆现在有 {before} 条引语，quotes_replace 给了 {after} 条。"
         "trace 只能订正和删除已有的引语，不能加——多出来的那句不是"
         "「当时说出口就知道要记住」的，是现在才决定要记的。"
-        "只想改其中几句，就把要保留的原样一起传回来。本次未修改。"
-    )
+        "只想改其中几句，就把要保留的原样一起传回来。本次未修改。")
 
 
-def validate(existing: list[dict[str, str]], incoming: list) -> str:
-    """检查是否满足「只能改、只能删」，返回错误短句；空串表示通过。"""
+def validate(existing: list[dict[str, str]], incoming: list) -> None:
+    """检查是否满足「只能改、只能删」。不合法一律抛 ToolInputError。
+
+    为什么不再返回错误短句：见 _relation_edit.validate 的同款说明——
+    返回串会被当成一次成功的调用。
+    """
     if not existing:
-        return _REJECT_EMPTY
+        raise ToolInputError(_REJECT_EMPTY)
     if len(incoming) > len(existing):
-        return _reject_growth(len(existing), len(incoming))
-    return ""
+        _reject_growth(len(existing), len(incoming))
 
 
 async def apply(bucket_id: str, quotes_replace: list) -> str:
     """整体替换引语（空列表 = 全部删除），返回给模型看的中文短句。"""
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
-        return f"找不到记忆 {bucket_id}；本次未修改。"
+        raise ToolInputError(f"找不到记忆 {bucket_id}；本次未修改。")
 
     # 已存在的用宽容读取——磁盘上的 frontmatter 可能被手工编辑坏，
     # 一条坏数据不该让整个订正入口失效。
     existing = quotes_from_metadata(bucket.get("metadata") or {})
     incoming = list(quotes_replace)
 
-    error = validate(existing, incoming)
-    if error:
-        return error
+    validate(existing, incoming)
 
     try:
         # 结构、条数、长度的校验在 BucketManager 里统一做（超限拒绝不截断）。
         ok = await rt.bucket_mgr.update(bucket_id, event_actor="llm", quotes=incoming)
     except ValueError as exc:
-        return f"引语未通过校验：{exc} 本次未修改。"
+        raise ToolInputError(f"引语未通过校验：{exc} 本次未修改。")
 
     if not ok:
-        return f"找不到要修改的记忆文件 {bucket_id}；本次未修改。"
+        raise ToolInputError(f"找不到要修改的记忆文件 {bucket_id}；本次未修改。")
 
     if not incoming:
         rt.logger.info(f"op=trace_quotes action=clear {bucket_id} before={len(existing)}")
