@@ -67,8 +67,8 @@
     },
     {
       "path": "src/errors.py",
-      "sha256": "059bf507d0a12a49009f6d335f3880f2b0e79dfa0bad531f62cfc9591047ddcd",
-      "size": 25028
+      "sha256": "21185b0d341ab4b3b5b89a4de324290441820925bad38e6b57275aaec64c199e",
+      "size": 26591
     },
     {
       "path": "src/github_sync.py",
