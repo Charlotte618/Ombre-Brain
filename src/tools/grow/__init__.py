@@ -138,16 +138,19 @@ async def dispatch(
     # 预拆分模式：上层 AI 已拆好 N 条最终正文 → 逐字入库，跳过 digest 的二次改写。
     # 传了 items（非空列表）即走此路；不传则行为与旧版完全一致（向后兼容）。
     if isinstance(items, list) and len(items) > 0:
+        # 这四处校验都在 grow_items() 之前，失败时一个桶都没建。
+        # helper 保持返回错误串（它们在 _common.py 里被多处共用），
+        # 由调用点负责抛出——判据是「这次调用有没有写东西」。
         err = check_grow_items_payload(items)
         if err:
-            return err
+            raise ToolInputError(err)
         if content and content.strip():
             err = check_grow_input_size(content)
             if err:
-                return err
+                raise ToolInputError(err)
             err = _shifted_source_ranges_error(items, content)
             if err:
-                return err
+                raise ToolInputError(err)
         fingerprint = request_fingerprint(
             content=content, items=items, test_data=test_data
         )
@@ -163,7 +166,7 @@ async def dispatch(
 
     err = check_grow_input_size(content)
     if err:
-        return err
+        raise ToolInputError(err)
 
     fingerprint = request_fingerprint(
         content=content, items=None, test_data=test_data

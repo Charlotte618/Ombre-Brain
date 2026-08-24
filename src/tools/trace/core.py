@@ -179,7 +179,7 @@ async def trace_core(
         delete_reason=delete_reason,
     )
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
     if rt.mark_op:
         rt.mark_op("trace")
     rt.record_v3_tool_event("trace", {
@@ -461,7 +461,12 @@ async def trace_core(
 
     if delete:
         success = await rt.bucket_mgr.delete(bucket_id)
-        return f"已将记忆桶存入档案（不可在日常召回中浮现）: {bucket_id}" if success else f"未找到记忆桶: {bucket_id}"
+        if not success:
+            # 与上面 hard_delete 的 not_found 同一回事：桶不存在，这次什么都没归档。
+            # 之前这里 return 字符串，同一个函数里三种「找不到桶」两种处理，
+            # 调用方拿到 isError=False 会以为归档成功了。
+            raise ToolInputError(f"未找到记忆桶: {bucket_id}；本次未归档。")
+        return f"已将记忆桶存入档案（不可在日常召回中浮现）: {bucket_id}"
 
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:

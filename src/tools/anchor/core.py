@@ -42,12 +42,17 @@ async def anchor_set(bucket_id: str) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     metadata_err = check_metadata_size(bucket_id=bucket_id)
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
     if rt.mark_op:
         rt.mark_op("anchor")
     result = await rt.bucket_mgr.set_anchor(bucket_id, True)
     if not result["ok"]:
-        return f"我没能把它锚住：{result.get('error', '未知错误')}。当前 anchor: {result.get('count', '?')}/{result.get('limit', 24)}。"
+        # ok=False 与下面的 noop=True 是两个不同分支，不能混为一谈：
+        # 这里是桶不存在或配额满，anchor 一个都没加上；noop 才是幂等。
+        raise ToolInputError(
+            f"我没能把它锚住：{result.get('error', '未知错误')}。"
+            f"当前 anchor: {result.get('count', '?')}/{result.get('limit', 24)}。"
+        )
     if result.get("noop"):
         return f"它已经是 anchor 了。当前 {result['count']}/{result['limit']}。"
     return f"我把它放进 anchor 了。它现在是坐标系的一部分，不会被默认浮现挤进上下文。当前 {result['count']}/{result['limit']}。"
@@ -57,12 +62,12 @@ async def anchor_release(bucket_id: str) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     metadata_err = check_metadata_size(bucket_id=bucket_id)
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
     if rt.mark_op:
         rt.mark_op("release")
     result = await rt.bucket_mgr.set_anchor(bucket_id, False)
     if not result["ok"]:
-        return f"我没能把它移开：{result.get('error', '未知错误')}。"
+        raise ToolInputError(f"我没能把它移开：{result.get('error', '未知错误')}。")
     if result.get("noop"):
         return f"它本来就不是 anchor。当前 {result['count']}/{result['limit']}。"
     return f"我把它从 anchor 移开了。它会重新参与默认浮现。当前 {result['count']}/{result['limit']}。"

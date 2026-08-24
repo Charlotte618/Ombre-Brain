@@ -264,14 +264,14 @@ async def plan_create(
         raise ToolInputError("内容为空，无法登记计划。")
     size_err = check_content_size(content)
     if size_err:
-        return size_err
+        raise ToolInputError(size_err)
     metadata_err = check_metadata_size(
         status=status,
         related_bucket=related_bucket,
         why_remembered=why_remembered,
     )
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
     status = status.strip().lower()
     if status not in ("active", "resolved", "abandoned"):
         status = "active"
