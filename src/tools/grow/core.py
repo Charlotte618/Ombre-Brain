@@ -27,6 +27,7 @@ tools/grow/core.py — grow 长内容主路径（digest + merge）
 ========================================
 """
 
+from errors import ToolInputError
 import asyncio
 import uuid
 
@@ -61,7 +62,7 @@ async def grow_core(content: str, test_data: bool = False) -> str:
         ) from e
 
     if not isinstance(items, list) or not items:
-        return "内容为空或整理失败。"
+        raise ToolInputError("内容为空或整理失败。")
     payload_err = check_grow_items_payload(items)
     if payload_err:
         rt.logger.warning(f"grow digest output rejected: {payload_err}")
@@ -204,11 +205,11 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
         if s:
             clean.append(item)
     if not clean:
-        return "items 为空或都不合法，未创建任何桶。"
+        raise ToolInputError("items 为空或都不合法，未创建任何桶。")
     if not source_content.strip() and any(
         item.get("source_ranges") not in (None, [], "") for item in clean
     ):
-        return "source_ranges 需要同时提供 content 作为原文，未创建任何桶。"
+        raise ToolInputError("source_ranges 需要同时提供 content 作为原文，未创建任何桶。")
 
     source_ref = ""
     if source_content and source_content.strip():
@@ -223,7 +224,7 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
                 item["_source_ranges"] = ranges
             source_ref = rt.source_store.put(source_content)
         except (OSError, ValueError) as exc:
-            return f"原文证据保存失败，未创建任何桶：{safe_error_detail(exc)}"
+            raise ToolInputError(f"原文证据保存失败，未创建任何桶：{safe_error_detail(exc)}")
 
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
 

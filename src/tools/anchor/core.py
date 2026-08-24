@@ -26,6 +26,7 @@ pulse 顺带放在这里：它是系统状态 + 桶清单的总览，调用频�
 ========================================
 """
 
+from errors import ToolInputError
 from typing import Optional
 
 from .. import _runtime as rt
@@ -74,7 +75,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     try:
         stats = await rt.bucket_mgr.get_stats()
     except Exception as e:
-        return f"获取系统状态失败: {safe_error_detail(e)}"
+        raise ToolInputError(f"获取系统状态失败: {safe_error_detail(e)}")
 
     status = (
         f"=== 我现在的记忆 ===\n"

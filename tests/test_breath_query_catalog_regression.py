@@ -13,6 +13,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from tools.breath import dispatch
 
@@ -219,11 +221,12 @@ async def test_query_rejects_invalid_created_date_range(monkeypatch):
     manager = RankedBucketManager([])
     _install_runtime(monkeypatch, manager)
 
-    output = await dispatch(
+    with pytest.raises(ToolInputError) as excinfo:
+        await dispatch(
         query="游戏",
         date_from="2026-07-20",
         date_to="2026-07-19",
-    )
+        )
 
-    assert "date_from 不能晚于 date_to" in output
+    assert 'date_from 不能晚于 date_to' in str(excinfo.value)
     assert manager.search_calls == 0

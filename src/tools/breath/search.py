@@ -26,6 +26,7 @@ tools/breath/search.py — 有 query 的检索模式
 ========================================
 """
 
+from errors import ToolInputError
 import asyncio
 import hashlib
 import random
@@ -220,9 +221,9 @@ async def surface_search(
         created_from = _parse_date_bound(date_from, upper=False)
         created_to = _parse_date_bound(date_to, upper=True)
     except (TypeError, ValueError):
-        return "日期格式无效，请使用 YYYY-MM-DD 或 ISO 8601 时间。"
+        raise ToolInputError("日期格式无效，请使用 YYYY-MM-DD 或 ISO 8601 时间。")
     if created_from and created_to and created_from > created_to:
-        return "date_from 不能晚于 date_to。"
+        raise ToolInputError("date_from 不能晚于 date_to。")
 
     try:
         footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
@@ -258,7 +259,7 @@ async def surface_search(
         exact_bucket = None
     if exact_bucket:
         if is_letter_bucket(exact_bucket):
-            return "Letter 不通过普通 breath 检索返回；请使用 letter_read。"
+            raise ToolInputError("Letter 不通过普通 breath 检索返回；请使用 letter_read。")
         meta = exact_bucket.get("metadata", {}) or {}
         is_archived = _is_archived(exact_bucket)
         archived_original_kind = (

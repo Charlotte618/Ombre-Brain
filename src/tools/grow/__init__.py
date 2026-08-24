@@ -19,6 +19,7 @@ grow 是「我把一段长内容整理进记忆」。短内容（<30 字）走 s
 ========================================
 """
 
+from errors import ToolInputError
 import re
 from typing import Optional
 
@@ -123,12 +124,10 @@ def _shifted_source_ranges_error(items: list, source_content: str) -> str:
     preview = "、".join(shifted_titles[:3])
     if len(shifted_titles) > 3:
         preview += " 等"
-    return (
-        "source_ranges 疑似与 items 错位："
+    raise ToolInputError("source_ranges 疑似与 items 错位："
         f"{preview} 的显式标题只在各自声明范围之外同向出现。"
         "为避免保存错误原文证据，本批次未创建任何桶；"
-        "请重新核对 1-based 闭区间。"
-    )
+        "请重新核对 1-based 闭区间。")
 
 
 async def dispatch(
@@ -160,7 +159,7 @@ async def dispatch(
         )
 
     if not content or not content.strip():
-        return "内容为空，无法整理。"
+        raise ToolInputError("内容为空，无法整理。")
 
     err = check_grow_input_size(content)
     if err:
