@@ -539,6 +539,9 @@ class BucketManager:
             self.base_dir,
             str(config.get("media_dir") or os.path.join(self.base_dir, "_media")),
             max_bytes=int(config.get("media_max_bytes") or 25 * 1024 * 1024),
+            # 同一个上限传下去，让 MediaStore 在动手持久化之前就拒绝超量，
+            # 而不是逐项写完再由下面的 _normalize_media 截断。
+            max_items=_MEDIA_MAX_ITEMS,
         )
         self.permanent_dir = os.path.join(self.base_dir, "permanent")
         self.dynamic_dir = os.path.join(self.base_dir, "dynamic")

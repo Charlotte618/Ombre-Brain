@@ -42,8 +42,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "b786a8ad51cfcddb09d63b6b318a9f64640a57a4e854dad6a59d722549740006",
-      "size": 199678
+      "sha256": "36ead9eb9c53a2432f76e8e53979a8f9dfd4f6936cafa825b364c12c4ed1ad5b",
+      "size": 199898
     },
     {
       "path": "src/decay_engine.py",
@@ -727,8 +727,8 @@
     },
     {
       "path": "src/ombrebrain/storage/media_store.py",
-      "sha256": "596072dd4f4dc999c2f9bef1f1031f424059c5111ca5ae09f7962a927a8b61af",
-      "size": 7967
+      "sha256": "61ef5cbd660865eb395d9ac296e0a3e4d332628ba4665cf4abe9e5a647ee2469",
+      "size": 12309
     },
     {
       "path": "src/ombrebrain/storage/quote_store.py",
@@ -947,8 +947,8 @@
     },
     {
       "path": "src/tools/hold/__init__.py",
-      "sha256": "61b7340863a5d6c2f54a57020fffee7e78e161bef1c1c217d45ad6626df6e985",
-      "size": 12992
+      "sha256": "72de6e2c8a2d34b2382bc532dc1838762c6e77a641d8a67a81756466e1260484",
+      "size": 13894
     },
     {
       "path": "src/tools/hold/core.py",

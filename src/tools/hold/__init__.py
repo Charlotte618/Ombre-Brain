@@ -247,6 +247,19 @@ async def dispatch(
             "breath_search(query=...) 找到那条桶的 bucket_id，再传入 source_bucket=id。"
         )
 
+    # 媒体的持久化在建桶那一步，比下面 _prepare_source_refs 写原文证据晚。
+    # 等到那时才失败，原文已经落进 _sources，而错误正文说的是「未创建任何桶」
+    # ——调用方据此重试，上一半副作用已经在那了。真机复现过：
+    #   hold(source_content="...", media=[{"data_base64": "@@@垃圾@@@"}])
+    #     → isError=True、buckets=0，但 _sources 里多了一个 38 字节的文件
+    # 所以先把媒体里所有可失败的部分跑一遍，不落盘。
+    # 只在真要写原文时才付这个代价（path 类媒体会被读两遍），普通 hold 不受影响。
+    if media and source_content and str(source_content).strip():
+        try:
+            await rt.bucket_mgr.media_store.precheck(media)
+        except MediaPersistenceError as exc:
+            raise ToolInputError(str(exc)) from exc
+
     source_refs = _prepare_source_refs(source_content, source_ranges)
     quotes_list = _prepare_quotes(quotes)
 
