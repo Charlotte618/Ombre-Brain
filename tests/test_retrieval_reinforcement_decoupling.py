@@ -1,20 +1,3 @@
-"""检索与强化解耦（3.6.0）。
-
-3.6.0 之前，`breath_search` 对**每一条命中**都 touch()：刷新 last_active、
-activation_count +1、触发时间涟漪。于是产生了一条谁都没打算要的规则——
-**查得勤 == 更重要**。
-
-实际发生的事：为核对事实、debug、反复找同一件事而读一条记忆，读着读着它的
-权重就爬到最高（实测积到 51），新桶再也排不进浮现区。
-
-检索是「我去找它」，强化是「找到之后，这条确实要紧」。前者是我的动作，
-后者是关于这条记忆的判断，只有读完才做得出来。绑在一起等于让读取行为自己
-给自己投票。
-
-这个文件钉两件事：**检索一条都不 touch**，以及**显式强化仍然有效**。
-少了后半条，这就不是解耦而是把强化删了。
-"""
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,8 +24,6 @@ class NoopDecay:
 
 
 class CountingBucketManager:
-    """记下所有强化动作。touch / touch_many 都要盯——漏一个就等于没解耦。"""
-
     def __init__(self, buckets):
         self.buckets = list(buckets)
         self.touched: list[str] = []
@@ -111,14 +92,8 @@ def manager(monkeypatch):
     return mgr
 
 
-# --------------------------------------------------------------
-# 检索侧：一条都不 touch
-# --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_query_search_reinforces_nothing(manager):
-    """命中一条不代表它要紧，只代表我在找它。"""
     out = await breath_dispatch(query="记忆")
 
     assert "被反复查询的那条记忆。" in out
@@ -127,7 +102,6 @@ async def test_query_search_reinforces_nothing(manager):
 
 @pytest.mark.asyncio
 async def test_repeated_queries_never_accumulate_weight(manager):
-    """这是 bug 的形状：为 debug 反复查同一件事，权重不该跟着涨。"""
     for _ in range(20):
         await breath_dispatch(query="记忆")
 
@@ -136,11 +110,6 @@ async def test_repeated_queries_never_accumulate_weight(manager):
 
 @pytest.mark.asyncio
 async def test_exact_bucket_id_lookup_reinforces_nothing(manager):
-    """按完整 ID 取桶尤其不能强化。
-
-    这条路径存在的理由就是「改之前先读一眼磁盘上的原文」——越是要改它越会
-    先读它，读一次涨一次权重是纯粹的自我实现。
-    """
     out = await breath_dispatch(query="hit-one")
 
     assert "被反复查询的那条记忆。" in out
@@ -149,20 +118,13 @@ async def test_exact_bucket_id_lookup_reinforces_nothing(manager):
 
 @pytest.mark.asyncio
 async def test_default_surfacing_still_reinforces_nothing(manager):
-    """无参浮现本来就不 touch。一并钉住，免得解耦时把它改反了。"""
     await breath_dispatch()
 
     assert manager.touched == []
 
 
-# --------------------------------------------------------------
-# 强化侧：显式、按桶、仍然有效
-# --------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_explicit_reinforce_touches_exactly_that_bucket(manager):
-    """解耦不是把强化删了——读完之后针对那一条说「这条要紧」仍然有效。"""
     result = await trace_dispatch(bucket_id="hit-one", reinforce=True)
 
     assert "已强化" in result
@@ -171,7 +133,6 @@ async def test_explicit_reinforce_touches_exactly_that_bucket(manager):
 
 @pytest.mark.asyncio
 async def test_explicit_reinforce_reports_the_new_count(manager):
-    """回显强化前后的次数：看不到变化就等于没确认。"""
     result = await trace_dispatch(bucket_id="hit-one", reinforce=True)
 
     assert "3" in result and "4" in result
@@ -179,7 +140,6 @@ async def test_explicit_reinforce_reports_the_new_count(manager):
 
 @pytest.mark.asyncio
 async def test_reinforce_is_per_bucket_not_per_candidate_set(manager):
-    """一次只强化一条。检索命中里绝大多数只是路过。"""
     await breath_dispatch(query="记忆")
     await trace_dispatch(bucket_id="hit-one", reinforce=True)
 
@@ -197,18 +157,9 @@ async def test_reinforce_on_a_missing_bucket_fails_loudly(manager):
 
 @pytest.mark.asyncio
 async def test_reinforce_false_does_not_touch(manager):
-    """reinforce=False 走的是普通空调用（noop，见 cf8fcd6），一条也不该 touch。
-
-    默认值是 False，所以这条同时守着「每一次普通 trace 都不会顺手强化」。
-    """
     await trace_dispatch(bucket_id="hit-one", reinforce=False)
 
     assert manager.touched == []
-
-
-# --------------------------------------------------------------
-# 互斥：另外半个意图不能被静默丢掉
-# --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
