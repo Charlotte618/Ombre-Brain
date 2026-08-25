@@ -38,9 +38,10 @@ from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
-from ._date_range import bucket_in_created_range, parse_created_range, parse_date_bound
+from ._date_range import bucket_in_created_range, parse_created_range
+from ._shared import bucket_has_tags, footprint_reader
 from ._verbatim import render_stored_bucket
-from utils import count_tokens_approx, parse_bool, parse_iso_datetime
+from utils import count_tokens_approx, parse_bool
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
@@ -48,13 +49,6 @@ _VECTOR_QUERY_TOPK = 50
 
 _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅使用关键词/BM25。]"
 _BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _can_surface_search(bucket: dict) -> bool:
@@ -91,12 +85,6 @@ def _render_archived_hit(bucket: dict, footprint: str) -> tuple[str, int]:
     )
     from utils import count_tokens_approx
     return rendered, count_tokens_approx(rendered)
-
-
-# 这两个曾经长在本文件里，只有检索分支认；3.6.0 抽到 _date_range 供五条分支共用。
-# 别名保留，本文件下方与既有测试仍按旧名引用。
-_parse_date_bound = parse_date_bound
-_bucket_in_created_range = bucket_in_created_range
 
 
 async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
@@ -199,18 +187,7 @@ async def surface_search(
     if created_from is None and created_to is None:
         created_from, created_to = parse_created_range(date_from, date_to)
 
-    try:
-        footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-    except Exception as exc:
-        rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-        footprint_snapshot = None
-
-    def _footprint(bucket: dict) -> str:
-        if footprint_snapshot is None:
-            return "👣 Footprint：暂时无法读取"
-        return footprint_snapshot.summary(
-            str(bucket.get("id") or ""), bucket.get("metadata", {})
-        )
+    _footprint = footprint_reader()
 
     # A full bucket id is an address, not a semantic query.  Resolve it before
     # embedding/BM25 work so callers can reliably read the on-disk source text
@@ -237,15 +214,13 @@ async def surface_search(
         meta = exact_bucket.get("metadata", {}) or {}
         is_archived = _is_archived(exact_bucket)
         archived_original_kind = (
-            footprint_snapshot.original_kind(exact_id, meta)
-            if is_archived and footprint_snapshot is not None
-            else "dynamic"
+            _footprint.original_kind(exact_id, meta) if is_archived else "dynamic"
         )
         if (
             is_archived
             and archived_original_kind not in ("feel", "plan", "letter")
-            and _bucket_has_tags(meta, tag_filter)
-            and _bucket_in_created_range(exact_bucket, created_from, created_to)
+            and bucket_has_tags(meta, tag_filter)
+            and bucket_in_created_range(exact_bucket, created_from, created_to)
         ):
             rendered, entry_tokens = _render_archived_hit(
                 exact_bucket, _footprint(exact_bucket)
@@ -255,8 +230,8 @@ async def surface_search(
             not is_archived
             and meta.get("type") not in ("feel", "plan", "letter")
             and _can_surface_search(exact_bucket)
-            and _bucket_has_tags(meta, tag_filter)
-            and _bucket_in_created_range(exact_bucket, created_from, created_to)
+            and bucket_has_tags(meta, tag_filter)
+            and bucket_in_created_range(exact_bucket, created_from, created_to)
         ):
             protected_mark = (
                 "🛡️ [受保护记忆] "
@@ -315,10 +290,8 @@ async def surface_search(
         if is_letter_bucket(bucket):
             continue
         if _is_archived(bucket):
-            original_kind = (
-                footprint_snapshot.original_kind(str(bucket.get("id") or ""), meta)
-                if footprint_snapshot is not None
-                else "dynamic"
+            original_kind = _footprint.original_kind(
+                str(bucket.get("id") or ""), meta
             )
             if original_kind in ("feel", "plan", "letter"):
                 continue
@@ -326,10 +299,10 @@ async def surface_search(
             continue
         eligible_matches.append(bucket)
     matches = eligible_matches
-    matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
+    matches = [b for b in matches if bucket_has_tags(b["metadata"], tag_filter)]
     matches = [
         b for b in matches
-        if _bucket_in_created_range(b, created_from, created_to)
+        if bucket_in_created_range(b, created_from, created_to)
     ]
     matches = matches[:max_results]
     rt.logger.info(
@@ -342,7 +315,6 @@ async def surface_search(
     results = []
     token_used = 0
     budget_blocked = False
-    touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
     for bucket in matches:
         meta = bucket["metadata"]
         bucket_id = bucket["id"]
@@ -385,8 +357,6 @@ async def surface_search(
             break
         results.append(rendered)
         token_used += entry_tokens
-        if not _is_archived(bucket):
-            touched_ids.append(bucket_id)
 
     # --- 3.6.0：检索不再强化。retrieval ≠ reinforcement ---
     #
@@ -402,11 +372,6 @@ async def surface_search(
     # 所以这条路径现在是**只读的**，一条都不 touch。要强化某条，读完之后针对
     # 那一条显式说：trace(bucket_id, reinforce=True)。是「那一条」而不是「这批
     # 候选」——检索命中里绝大多数只是路过。
-    if touched_ids:
-        rt.logger.info(
-            f"breath_search read-only: {len(touched_ids)} hits not reinforced "
-            f"(use trace(bucket_id, reinforce=True) per bucket)"
-        )
 
     # 检索命中不足时保留设计上的自由联想；用独立分区明确标记，
     # 避免调用方把随机旧桶误当成查询命中。
@@ -426,7 +391,7 @@ async def surface_search(
                     b["metadata"].get("protected"), default=False
                 )
                 and rt.decay_engine.calculate_score(b["metadata"]) < 2.0
-                and _bucket_in_created_range(b, created_from, created_to)
+                and bucket_in_created_range(b, created_from, created_to)
             ]
             remaining_slots = max(0, max_results - len(matches))
             if low_weight and remaining_slots:

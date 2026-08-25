@@ -27,6 +27,7 @@ from ombrebrain.storage.relation_store import relation_hint
 from utils import parse_bool
 from errors import safe_error_detail
 from ._date_range import bucket_in_created_range
+from ._shared import footprint_reader
 
 # 类型 → (区头, 排序位)。未知类型归入动态区兜底。
 _SECTIONS = [
@@ -64,16 +65,7 @@ async def surface_catalog(
         if not buckets:
             return "这段时间里没有记忆。"
 
-    try:
-        footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-    except Exception as exc:
-        rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-        footprint_snapshot = None
-
-    def _footprint(bucket: dict, meta: dict) -> str:
-        if footprint_snapshot is None:
-            return "👣 Footprint：暂时无法读取"
-        return footprint_snapshot.summary(str(bucket.get("id") or ""), meta)
+    _footprint = footprint_reader()
 
     grouped: dict[str, list[tuple[int, str]]] = {key: [] for key, _ in _SECTIONS}
     for b in buckets:

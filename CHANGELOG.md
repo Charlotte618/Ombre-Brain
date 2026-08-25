@@ -74,6 +74,21 @@
   「显式强化仍然有效」——少了后半条就不是解耦，是把强化删了）。
 - 浮现用例统一 monkeypatch 掉 `random.shuffle` 与 3% 偶遇：测排序规则的用例不该
   时绿时红，「偶尔红一次」比一直红更难查。
+- **breath 模块去重**：新增 `tools/breath/_shared.py`，五条分支各减一段样板。
+  - `footprint_reader()` —— 取快照 + 兜底文案 + 读取闭包，原本在 surface（两处）、
+    feel、catalog、importance、search **各抄了一份**，共 6 份。顺带修掉 search
+    里「渲染走闭包、判归档原型却直接摸 snapshot」的两套写法。
+  - `bucket_has_tags()` —— 原本 3 份，逐字相同。
+  - `render_within_budget()` —— feel 与 `surface_plans` 的预算循环逐字相同
+    （`surface_plans` 的 docstring 本来就写着「与 feel 通道同构」）。
+  - 五个分支文件净减 127 行，新模块 61 行；6 份重复塌成 1 份。行为不变，
+    全量用例逐条对照通过。
+  - **没有动**的重复：`tools/_runtime.run_v3_operation` 与
+    `web/_shared.run_v3_web_operation` 函数体逐字相同，但两者都靠
+    `globals().get("v3_runtime")` 读**各自模块**被注入的 runtime——看着像复制粘贴，
+    实际是承重的，合并会让工具层与 Web 层共用一个 runtime。
+- **压测**：全量用例在 4 个随机种子下跑通（`pytest-randomly`），验证模块级
+  `rt` 全局没有留下顺序依赖。Docker 集成用例因本机 daemon 未运行而跳过。
 
 ## 3.5.0
 

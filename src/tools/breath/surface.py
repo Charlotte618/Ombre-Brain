@@ -40,6 +40,7 @@ from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from utils import parse_bool, parse_iso_datetime
 from ._date_range import bucket_in_created_range
+from ._shared import bucket_has_tags, footprint_reader, render_within_budget
 from ._verbatim import render_stored_bucket
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
@@ -64,13 +65,6 @@ _PIN_BUDGET_NOTICE = (
     "token 预算不足：核心准则 required≈{required} tokens（完整渲染核心准则总计），"
     "limit={limit} tokens，omitted={omitted} 条；普通浮现已跳过（ordinary surfacing skipped）。"
 )
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _can_surface(bucket: dict) -> bool:
@@ -198,35 +192,9 @@ async def surface_plans(max_tokens: int) -> str:
         if not plans:
             return "没有计划。"
 
-        try:
-            footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-        except Exception as exc:
-            rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-            footprint_snapshot = None
-
-        def _footprint(bucket: dict) -> str:
-            if footprint_snapshot is None:
-                return "👣 Footprint：暂时无法读取"
-            return footprint_snapshot.summary(
-                str(bucket.get("id") or ""), bucket.get("metadata", {})
-            )
-
-        lines: list[str] = []
-        used = 0
-        omitted = 0
-        for index, p in enumerate(plans):
-            created = p["metadata"].get("created", "")
-            entry, cost = render_stored_bucket(
-                p,
-                f"[{created}] [bucket_id:{p['id']}]",
-                _footprint(p),
-            )
-            if used + cost <= max_tokens:
-                lines.append(entry)
-                used += cost
-            else:
-                omitted = len(plans) - index
-                break
+        lines, omitted = render_within_budget(
+            plans, max_tokens, footprint_reader()
+        )
         out = (
             "=== 你的 active plans（新→旧）===\n"
             "完成了用 trace(bucket_id, status=\"resolved\")，"
@@ -267,18 +235,7 @@ async def surface_default(
         all_buckets_in_range = all_buckets
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}
-    try:
-        footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-    except Exception as exc:
-        rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-        footprint_snapshot = None
-
-    def _footprint(bucket: dict) -> str:
-        if footprint_snapshot is None:
-            return "👣 Footprint：暂时无法读取"
-        return footprint_snapshot.summary(
-            str(bucket.get("id") or ""), bucket.get("metadata", {})
-        )
+    _footprint = footprint_reader()
 
     # --- pinned/permanent 桶置顶（protected 仅防衰减，不主动浮现）---
     # 排除 letter 桶：letter 的 importance=10 不代表核心准则。
@@ -334,7 +291,7 @@ async def surface_default(
         and not b["metadata"].get("pinned", False)
         and not parse_bool(b["metadata"].get("protected"), default=False)
         and not b["metadata"].get("dont_surface", False)
-        and _bucket_has_tags(b["metadata"], tag_filter)
+        and bucket_has_tags(b["metadata"], tag_filter)
     ]
 
     rt.logger.info(

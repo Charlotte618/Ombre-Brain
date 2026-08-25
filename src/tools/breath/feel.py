@@ -26,7 +26,7 @@ from datetime import datetime  # noqa: F401 —— 供签名注解使用
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from ._date_range import bucket_in_created_range
-from ._verbatim import render_stored_bucket
+from ._shared import footprint_reader, render_within_budget
 
 # 与 breath_search 的向量通道保持同一门槛，避免两条检索面给出不同的"相关"标准。
 # 0.65 是试出来的。0.6 的时候搜「下雨」能把「今天好累」勾出来，0.7 又谁都不认识谁。
@@ -126,35 +126,9 @@ async def surface_feels(
             reverse=True,
         )
 
-        try:
-            footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-        except Exception as exc:
-            rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-            footprint_snapshot = None
-
-        def _footprint(bucket: dict) -> str:
-            if footprint_snapshot is None:
-                return "👣 Footprint：暂时无法读取"
-            return footprint_snapshot.summary(
-                str(bucket.get("id") or ""), bucket.get("metadata", {})
-            )
-
-        lines: list[str] = []
-        used = 0
-        omitted = 0
-        for index, f in enumerate(matched):
-            created = f["metadata"].get("created", "")
-            entry, cost = render_stored_bucket(
-                f,
-                f"[{created}] [bucket_id:{f['id']}]",
-                _footprint(f),
-            )
-            if used + cost <= max_tokens:
-                lines.append(entry)
-                used += cost
-            else:
-                omitted = len(matched) - index
-                break
+        lines, omitted = render_within_budget(
+            matched, max_tokens, footprint_reader()
+        )
 
         header = f"=== 和「{query}」相关的 feel（{len(matched)} 条）===\n"
         out = (f"{notice}\n" if notice else "") + header + "\n---\n".join(lines)

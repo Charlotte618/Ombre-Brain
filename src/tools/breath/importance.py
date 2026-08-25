@@ -27,17 +27,11 @@ from .. import _runtime as rt
 from .._common import is_importance_audit_candidate
 from ..plan.core import is_letter_bucket
 from ._date_range import bucket_in_created_range
+from ._shared import bucket_has_tags, footprint_reader
 from ._verbatim import render_stored_bucket
 from errors import safe_error_detail
 
 _BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _importance_of(bucket: dict) -> int:
@@ -133,7 +127,7 @@ async def surface_by_importance(
             b.get("metadata", {}), importance_min
         )
         and not is_letter_bucket(b)
-        and _bucket_has_tags(b.get("metadata", {}), tag_filter)
+        and bucket_has_tags(b.get("metadata", {}), tag_filter)
         # 3.6.0：重要度审计也认时间区间。日期过滤必须在 20 条截断**之前**——
         # 先截后滤会让「七月的高重要度记忆」变成「全库前 20 里恰好在七月的那几条」。
         and bucket_in_created_range(b, created_from, created_to)
@@ -144,18 +138,7 @@ async def surface_by_importance(
             return f"这段时间里没有重要度 >= {importance_min} 的记忆。"
         return f"没有重要度 >= {importance_min} 的记忆。"
 
-    try:
-        footprint_snapshot = rt.bucket_mgr.footprint_snapshot()
-    except Exception as exc:
-        rt.logger.warning(f"Footprint snapshot unavailable / 足迹读取失败: {exc}")
-        footprint_snapshot = None
-
-    def _footprint(bucket: dict) -> str:
-        if footprint_snapshot is None:
-            return "👣 Footprint：暂时无法读取"
-        return footprint_snapshot.summary(
-            str(bucket.get("id") or ""), bucket.get("metadata", {})
-        )
+    _footprint = footprint_reader()
 
     results = []
     token_used = 0
