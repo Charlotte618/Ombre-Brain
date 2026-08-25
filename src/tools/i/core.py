@@ -81,9 +81,10 @@ async def i_core(
     await rt.decay_engine.ensure_started()
 
     if promote:
+        # 两处 size 检查都在写入之前，超限时一个桶都没建。
         size_err = check_content_size(content) if content.strip() else ""
         if size_err:
-            return size_err
+            raise ToolInputError(size_err)
         return await _promote_candidate(promote, content.strip())
     if read or not content.strip():
         return await _read_i(limit)
@@ -92,7 +93,7 @@ async def i_core(
         raise ToolInputError(f"aspect 无效：{aspect}。可选值: {choices}")
     size_err = check_content_size(content)
     if size_err:
-        return size_err
+        raise ToolInputError(size_err)
     return await _write_candidate(content.strip(), aspect)
 
 

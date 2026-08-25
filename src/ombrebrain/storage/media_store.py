@@ -62,7 +62,11 @@ class MediaStore:
         路径畅通无阻。真机复现过一次读走 vault 外文件并落成记忆附件。
         """
         roots: list[Path] = []
-        for candidate in (tempfile.gettempdir(), os.environ.get("TMPDIR") or "", "/tmp"):
+        # B108 在这里是反的：它防的是「往写死的 /tmp 里建临时文件」，而这行是
+        # 把 /tmp 列进**允许读取的白名单**——这个函数本身就是那道限制。
+        # 显式列它是因为 gettempdir() 在 macOS 上返回 /var/folders/...，
+        # 而容器里的客户端通常把上传文件放在 /tmp，只认 gettempdir() 会漏掉。
+        for candidate in (tempfile.gettempdir(), os.environ.get("TMPDIR") or "", "/tmp"):  # nosec B108
             if not candidate:
                 continue
             try:
