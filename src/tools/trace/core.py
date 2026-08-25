@@ -649,9 +649,15 @@ async def trace_core(
             updates["media"] = media_replace
 
         if not updates and not patch_args_supplied:
-            # trace 是写工具：调它就是有改的意图。一个字段都没落到 updates 上，
-            # 意味着那个意图整个落空了，不能报成一次正常返回。
-            raise ToolInputError("没有任何字段需要修改。")
+            # 空调用是干净的 noop，不是失败——调用方什么都没要求改，也就谈不上
+            # 「要求了却没做到」。这跟 anchor 的「它已经是 anchor 了」、
+            # 「两条记忆之间本来就没有关系」是同一类。
+            #
+            # 我一度把它改成抛异常（理由是「trace 是写工具，调它就有改的意图」），
+            # 那是推翻了既有契约：test_mcp_tools_docker_integration.py 里
+            # test_trace_existing_bucket_without_changes_is_a_clean_noop
+            # 明确断言它返回这句话且 isError=False。
+            return "没有任何字段需要修改。"
 
         # --- plan 桶：status / content 改变时追加 change_log ---
         content_change_requested = "content" in updates or patch_args_supplied
