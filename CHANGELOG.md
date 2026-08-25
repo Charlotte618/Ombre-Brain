@@ -2,6 +2,30 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.6.1
+
+### 修复 / Fixed
+
+- **补上 `tzdata` 依赖：此前配置的时区在缺少系统 tzdata 的环境里会静默失效。**
+  - `zoneinfo` 只查宿主机的 IANA 时区库。`python:*-slim` 这类镜像和 Windows
+    都没有它，于是 `ZoneInfo("UTC")` 直接抛 `ZoneInfoNotFoundError`。
+  - 失效是**静默的**：`utils.get_tzinfo()` 在异常时兜底成固定 +08:00。配
+    `timezone: "America/New_York"` 的用户会拿到东八区的解锁时间，没有任何提示。
+    Dashboard 那边则相反——`config_api` 用 `ZoneInfo(raw_tz)` 校验，于是每一个
+    时区名（**包括 UTC**）都被判成「无法识别」。
+  - 这个缺口一直被两条用例照着，但照出来的样子会骗人：
+    `test_naive_unlock_date_uses_configured_timezone` 前三条断言期望 +08:00，
+    而兜底值恰好就是 +08:00——**它们是空过的**，只有最后那条改成 UTC 的断言
+    会红。所以现象看起来像「热更新失效」，实际是「IANA 库根本不存在」。
+  - 修法是把纯数据包 `tzdata` 列为生产依赖，与宿主机无关。
+  - 这次改锁文件跨了 `test_update_source_gate` 那条发布绊线，基线哈希已推进。
+    评估记在该用例的 docstring 里：本次 lock diff 是**纯增量的 4 行**，既有包
+    版本一个都没动，与 2026-08-09 那次连带升 mcp/openai/uvicorn 的破坏性变更
+    不是一回事。
+  - **未实测**：`python:3.12-slim` 到底带不带系统 tzdata，本机 Docker 起不来，
+    没能验证。「生产会静默错」是据 `zoneinfo` 的行为推断的，不是实测结论。
+    带上 pip 包之后这个问题与宿主机无关，所以推断错了也不影响修复的正确性。
+
 ## 3.6.0
 
 > 四个问题，三个是同一件事：**累积量被当成了状态**。
