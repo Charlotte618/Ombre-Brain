@@ -22,6 +22,7 @@ async def dispatch(
     explicit: Optional[bool] = False,
     long_term: Optional[bool] = False,
     delete_id: Optional[str] = "",
+    with_ids: Optional[bool] = False,
     max_results: Optional[int] = 6,
 ) -> str:
     """读回（默认）、写入/重申（给 content）、或撤回（给 delete_id）。"""
@@ -51,4 +52,5 @@ async def dispatch(
         query="" if query is None else str(query),
         aspect="" if aspect is None else str(aspect),
         max_results=6 if max_results is None else max_results,
+        with_ids=bool(with_ids),
     )

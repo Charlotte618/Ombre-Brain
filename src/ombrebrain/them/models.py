@@ -67,10 +67,22 @@ def normalize_name(value: object) -> str:
     return text
 
 
-# 这个人是谁登记的。决定人类看得见多少（rule.md 13.3）。
+# 这个人是谁登记的。**只决定人类看得见多少**（rule.md 13.3）。
 ORIGIN_MODEL = "model"
 ORIGIN_HUMAN = "human"
 VALID_ORIGINS = frozenset({ORIGIN_MODEL, ORIGIN_HUMAN})
+
+# 我到底见没见过这个人。**只是认识论上的来源**，与可见性无关。
+#
+# 这两件事原先是同一个 bit：`known_via` 由 `origin` 推导出来。于是模型写一个
+# 「只听人类说起过」的人时，没有任何办法把它标对——而想标对就必然连带把自己
+# 关于这个人的私有认识对人类公开，因为那是同一个开关。
+#
+# 拆开之后：`origin` 继续管可见性（模型改不动），`known_via` 只管来源
+# （模型自己说了算）。引用二手信息时该留的那层不确定，终于说得出口了。
+KNOWN_VIA_MET_MYSELF = "met_myself"
+KNOWN_VIA_HEARD_FROM_USER = "heard_from_user"
+VALID_KNOWN_VIA = frozenset({KNOWN_VIA_MET_MYSELF, KNOWN_VIA_HEARD_FROM_USER})
 
 # 一个人身上最多挂几条待读的人类留言。留言是给模型看一次的提醒，不是收件箱；
 # 堆到这个数还没被读走，说明浮现根本没发生，再堆下去也没用。
@@ -110,6 +122,7 @@ class Person:
     pending_rename: tuple[str, ...] = ()
     renamed_at: str = ""
     origin: str = ORIGIN_MODEL
+    known_via: str = ""
     pending_notes: tuple[dict[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -145,8 +158,25 @@ class Person:
         object.__setattr__(self, "renamed_at", str(self.renamed_at or ""))
         origin = str(self.origin or ORIGIN_MODEL).strip().lower()
         if origin not in VALID_ORIGINS:
-            raise ValueError("invalid person origin")
+            raise ValueError(
+                f"origin「{origin}」不是允许值。可选：{' / '.join(sorted(VALID_ORIGINS))}。"
+            )
         object.__setattr__(self, "origin", origin)
+        # 空串 = 这条数据早于 known_via 独立成字段。按老规则从 origin 推一次，
+        # 存量记录的表现因此与拆分前逐字一致；此后它就是一个独立字段了。
+        known_via = str(self.known_via or "").strip().lower()
+        if not known_via:
+            known_via = (
+                KNOWN_VIA_HEARD_FROM_USER
+                if origin == ORIGIN_HUMAN
+                else KNOWN_VIA_MET_MYSELF
+            )
+        if known_via not in VALID_KNOWN_VIA:
+            raise ValueError(
+                f"known_via「{known_via}」不是允许值。"
+                f"可选：{' / '.join(sorted(VALID_KNOWN_VIA))}。"
+            )
+        object.__setattr__(self, "known_via", known_via)
         notes: list[dict[str, str]] = []
         for item in self.pending_notes or ():
             if not isinstance(item, Mapping):
@@ -168,8 +198,14 @@ class Person:
         names: list[str] | tuple[str, ...],
         *,
         origin: str = ORIGIN_MODEL,
+        known_via: str = "",
     ) -> "Person":
-        return cls(id=new_id("person"), names=tuple(names), origin=origin)
+        return cls(
+            id=new_id("person"),
+            names=tuple(names),
+            origin=origin,
+            known_via=known_via,
+        )
 
     @property
     def human_visible(self) -> bool:
@@ -177,8 +213,16 @@ class Person:
 
         只有人类自己登记的人才可见。模型自己认出来的人，人类只看得见称呼——
         那是 rule.md 13.3 划的线，`them` 属于模型。
+
+        **这里只看 `origin`，不看 `known_via`。** 两者拆开之后，模型把某人标成
+        「只听你说起过」不再顺带把自己的私有认识交出去——可见性依然只由
+        「谁登记的这个人」决定，模型改不动。
         """
         return self.origin == ORIGIN_HUMAN
+
+    def with_known_via(self, known_via: str) -> "Person":
+        """订正「我到底见没见过这个人」。不动可见性，也不算一次被提起。"""
+        return replace(self, known_via=known_via)
 
     def with_note(self, text: str, *, at: str | None = None) -> "Person":
         """人类留一条纠错。攒着，等下次浮现一起交给模型。
@@ -259,6 +303,9 @@ class Person:
             pending_rename=tuple(value.get("pending_rename") or ()),
             renamed_at=value.get("renamed_at", "") or "",
             origin=value.get("origin") or ORIGIN_MODEL,
+            # 老记录没有这个键。空串交给 __post_init__ 按 origin 推一次，
+            # 存量数据的表现与拆分前逐字一致。
+            known_via=value.get("known_via") or "",
             pending_notes=tuple(value.get("pending_notes") or ()),
         )
 
@@ -274,6 +321,7 @@ class Person:
             "pending_rename": list(self.pending_rename),
             "renamed_at": self.renamed_at,
             "origin": self.origin,
+            "known_via": self.known_via,
             "pending_notes": [dict(note) for note in self.pending_notes],
         }
 

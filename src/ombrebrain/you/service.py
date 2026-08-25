@@ -580,6 +580,7 @@ class YouService:
         query: str = "",
         aspect: str = "",
         max_results: int = _MAX_HINT_RESULTS,
+        with_ids: bool = False,
     ) -> str:
         state = self.status()
         if not state.enabled or state.scope is None:
@@ -615,11 +616,22 @@ class YouService:
         # 这里原本还要再过一层 LLM（abstract_you_hint），把已经成立的认识磨成
         # "概念词组 + 关系词"再交出去。删掉了：模型自己写下的判断，没有理由让
         # 另一个模型改写一遍才还给它。正文直接返回。
+        # id 默认不给，要才给。
+        #
+        # delete_id 此前是够不着的：这条路径从来不交出 claim id，而它是撤回的
+        # 唯一入口。但无条件带上也不行——一个 id 约 12 token，而这里总预算只有
+        # 160，实测 4 条会掉到 3 条，为一个偶尔才用的能力常年砍掉 1/4 正文。
+        #
+        # 所以照 breath_search(quotes=True) 那套：默认一字不少，想撤回时明确要。
         lines = ["[你自己写下的、关于对方的长期认识；不是此刻的事实，按需自行判断]"]
+        if with_ids:
+            lines.append("[带 id 是为了撤回：You(delete_id=\"...\")]")
         for claim in candidates:
             if contains_forbidden_subject(claim.content):
                 continue
             next_line = "- " + claim.content
+            if with_ids:
+                next_line += f"  [id={claim.id}]"
             if count_tokens_approx("\n".join([*lines, next_line])) > _MAX_HINT_TOKENS:
                 break
             lines.append(next_line)

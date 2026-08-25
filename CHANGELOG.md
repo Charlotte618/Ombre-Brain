@@ -2,6 +2,39 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.6.3
+
+### 修复 / Fixed
+
+- **`delete_id` 此前是够不着的：You 与 Them 都从不交出 claim id。**
+  - 两个工具的签名里都有 `delete_id`，描述也写着「带 delete_id 是撤回一条」，
+    但**没有任何读取路径把 id 交出来过**。Them 的读回只给
+    `{aspect, content}`，候选清单只给「还差几天」；You 的读回只给
+    `- 正文`。一个宣称得到、却拿不到前提的能力，比没有这个能力更糟。
+  - Them：`claim_id` 直接进读回的 JSON，候选清单每条加 `id=`。它的输出没有
+    token 硬预算，无条件带上即可。
+  - You：新增 `with_ids=True`。**默认不带**——实测一个 id 约 12 token，而 You
+    的读回总预算只有 160，无条件带上会把 4 条正文挤成 3 条。为一个偶尔才用的
+    能力常年砍掉 1/4 正文不划算。照 `breath_search(quotes=True)` 那套：
+    默认一字不少，想撤回时明确要。
+
+### 变更 / Changed
+
+- **`known_via` 从 `origin` 里拆出来，成为独立字段。**
+  - 此前 `known_via` 是推导出来的：`"heard_from_user" if person.human_visible
+    else "met_myself"`，而 `human_visible` 就是 `origin == "human"`。
+  - 于是模型写一个「只在人类口中听说过」的人时，没有任何办法把它标对——**而想
+    标对就必然连带把自己关于这个人的私有认识对人类公开**，因为那是同一个开关。
+    `origin` 同时管着四件事：给模型看的 `known_via`、人类能不能看见模型写的
+    认识、人类能不能留纠错、同名不自动合并的判据。
+  - 拆开之后：`origin` 继续只管可见性（rule.md 13.3 的线，模型改不动），
+    `known_via` 只管「我见没见过这个人」（模型自己说了算）。
+  - `Them(content=..., known_via="heard_from_user")` 写入时指定；发现标错了，
+    下次写这个人时带上正确的值就订正过来。空串 = 不动。
+  - **存量数据零影响**：老记录没有这个键，`__post_init__` 按老规则从 `origin`
+    推一次，表现与拆分前逐字一致。persons 存的是 `payload_json`，不需要迁移
+    schema。
+
 ## 3.6.2
 
 ### 修复 / Fixed

@@ -22,6 +22,7 @@ async def dispatch(
     concept_key: Optional[str] = "",
     concept_value: Optional[str] = "",
     basis: Optional[str] = "observed_pattern",
+    known_via: Optional[str] = "",
     delete_id: Optional[str] = "",
     max_results: Optional[int] = 12,
 ) -> str:
@@ -45,6 +46,7 @@ async def dispatch(
             names=[str(item) for item in (names or [])],
             person_id="" if person_id is None else str(person_id),
             basis="observed_pattern" if basis is None else str(basis),
+            known_via="" if known_via is None else str(known_via),
         )
         return message
 

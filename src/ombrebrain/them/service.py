@@ -50,9 +50,11 @@ from ..you.models import (
 from ..you.service import partition_by_live_evidence
 
 from .models import (
+    KNOWN_VIA_HEARD_FROM_USER,
     MAX_PENDING_NOTES,
     ORIGIN_HUMAN,
     THEM_POLICY_VERSION,
+    VALID_KNOWN_VIA,
     Person,
     ThemClaim,
 )
@@ -137,7 +139,33 @@ class ThemService:
 
     # --- 人 ---
 
-    def _resolve_person(self, scope: Scope, names: list[str], person_id: str) -> Person:
+    def _apply_known_via(self, scope: Scope, person: Person, known_via: str) -> Person:
+        """写入时顺带订正「我见没见过这个人」。空串 = 不改。
+
+        订正走写入路径而不是单开一个接口：改这一项的时机，恰好就是「我正要写
+        关于他的一条，忽然意识到我其实没见过他」。分成两次调用只会让人忘掉第二次。
+        """
+        wanted = str(known_via or "").strip().lower()
+        if not wanted or wanted == person.known_via:
+            return person
+        if wanted not in VALID_KNOWN_VIA:
+            raise ValueError(
+                f"known_via「{wanted}」不是允许值。"
+                f"可选：{' / '.join(sorted(VALID_KNOWN_VIA))}。"
+            )
+        return self.store.put_person(
+            scope,
+            person.with_known_via(wanted),
+            expected_revision=person.revision,
+        )
+
+    def _resolve_person(
+        self,
+        scope: Scope,
+        names: list[str],
+        person_id: str,
+        known_via: str = "",
+    ) -> Person:
         """按 person_id 或名字找人；找不到就按给的名字新建一个。
 
         名字由模型自己列（正名 + 昵称），系统只做规范化和长度校验，不去和记忆里
@@ -163,7 +191,7 @@ class ThemService:
                 if str(name or "").strip() and str(name or "").strip() not in person.names
             ]
             if not 额外:
-                return person
+                return self._apply_known_via(scope, person, known_via)
             别人 = []
             for name in 额外:
                 另一个 = self.store.find_person_by_name(scope, name)
@@ -250,13 +278,15 @@ class ThemService:
             # 同为它自己遇到的人：把这次带来的新称呼并进去，下次换个叫法也认得出。
             merged = list(dict.fromkeys([*existing.names, *cleaned]))
             if merged != list(existing.names):
-                return self.store.put_person(
+                existing = self.store.put_person(
                     scope,
                     replace(existing, names=tuple(merged)),
                     expected_revision=existing.revision,
                 )
-            return existing
-        return self.store.put_person(scope, Person.new(cleaned))
+            return self._apply_known_via(scope, existing, known_via)
+        return self.store.put_person(
+            scope, Person.new(cleaned, known_via=known_via)
+        )
 
     def _touch_person(self, scope: Scope, person: Person) -> Person:
         """被提起了一次。them 的衰减只由这里驱动。"""
@@ -346,7 +376,16 @@ class ThemService:
                     f"「{existing.display_name}」已经用了「{name}」这个称呼。"
                     "两个人共用一个名字的话，姓名命中会同时把两份认识都拉出来。"
                 )
-        return self.store.put_person(scope, Person.new(cleaned, origin=ORIGIN_HUMAN))
+        # 人类登记的人，模型按定义没见过——是听人类说起才知道有这么个人。
+        # 显式写死而不是让它从 origin 推：拆分之后 origin 只管可见性了。
+        return self.store.put_person(
+            scope,
+            Person.new(
+                cleaned,
+                origin=ORIGIN_HUMAN,
+                known_via=KNOWN_VIA_HEARD_FROM_USER,
+            ),
+        )
 
     def leave_note(self, person_id: str, text: str) -> Person:
         """人类给模型留一条纠错。
@@ -503,11 +542,16 @@ class ThemService:
         names: list[str] | None = None,
         person_id: str = "",
         basis: str = "observed_pattern",
+        known_via: str = "",
     ) -> tuple[ThemClaim, str]:
-        """模型写下（或重申）一条关于某个人的认识。返回 (条目, 给模型看的话)。"""
+        """模型写下（或重申）一条关于某个人的认识。返回 (条目, 给模型看的话)。
+
+        `known_via` 空串表示不动：新人默认 `met_myself`，已有的人保持原样。
+        给了就顺带订正——这一项本来就是「我见没见过他」，只有模型说了算。
+        """
 
         scope = self._require_scope()
-        person = self._resolve_person(scope, names or [], person_id)
+        person = self._resolve_person(scope, names or [], person_id, known_via)
 
         edges, protected_texts = await self._build_edges(
             bucket_ids, basis=basis, person=person
@@ -943,14 +987,16 @@ class ThemService:
                 条目.append(
                     f"- {person.display_name}｜{claim.concept_key}="
                     f"{claim.concept_value}｜{claim.aspect}\n"
-                    f"  「{claim.content}」还差 {还差} 个不同的日子"
+                    f"  「{claim.content}」还差 {还差} 个不同的日子\n"
+                    f"  id={claim.id}"
                 )
         if not 条目:
             return ""
         return (
             "[下面这些还没算数，是你自己在攒的。想让哪条立住，就用同一个 "
             "concept_key + concept_value 再写一次；改主意了就别再确认，"
-            "它不会自己生效。]\n" + "\n".join(条目)
+            "它不会自己生效——也可以用 delete_id=<id> 现在就撤掉。]\n"
+            + "\n".join(条目)
         )
 
     async def surface(self, *, query: str = "") -> str:
@@ -1016,8 +1062,15 @@ class ThemService:
                     scope, person_id=person.id, callable_only=True
                 )[:max_results]
             )
+            # claim_id 必须带上：工具签名里有 delete_id，描述也写着「带 delete_id
+            # 是撤回一条」，但在这之前**没有任何路径把 id 交出来过**——那个参数
+            # 等于够不着。一个宣称得到、却拿不到前提的能力，比没有更糟。
             notes = [
-                {"aspect": claim.aspect, "content": claim.content}
+                {
+                    "claim_id": claim.id,
+                    "aspect": claim.aspect,
+                    "content": claim.content,
+                }
                 for claim in claims
                 if not contains_forbidden_subject(claim.content)
             ]
@@ -1029,9 +1082,10 @@ class ThemService:
                         # 混起来就是张冠李戴。人类那一侧靠名册的分组看得见，
                         # 模型这一侧得靠这个字段——否则它读回时无从分辨自己
                         # 到底见没见过这个人，而这恰恰是最该谨慎的那一档。
-                        "known_via": (
-                            "heard_from_user" if person.human_visible else "met_myself"
-                        ),
+                        # 3.6.3 起这是一个独立字段，不再由 origin 推导。
+                        # 推导版本的问题：想把某人标成「只听说过」，就必然连带
+                        # 把自己关于他的私有认识对人类公开——那是同一个开关。
+                        "known_via": person.known_via,
                         "notes": notes,
                     }
                 )
