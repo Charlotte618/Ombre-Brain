@@ -29,6 +29,18 @@ from .store import YouStore, YouStoreError
 _CONCEPT_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{2,119}$")
 _CONCEPT_VALUE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _CORE_ASPECTS = frozenset({"preferred_address", "explicit_boundary"})
+
+
+def _aspect_choices() -> str:
+    return " / ".join(sorted(VALID_ASPECTS))
+
+
+def _basis_choices() -> str:
+    return " / ".join(sorted(VALID_BASES))
+
+
+def _core_aspect_choices() -> str:
+    return " / ".join(sorted(_CORE_ASPECTS))
 _IGNORED_BUCKET_TYPES = frozenset({"archived", "feel", "plan", "letter", "self", "i"})
 _MAX_HINT_RESULTS = 6
 _MAX_HINT_TOKENS = 160
@@ -219,31 +231,61 @@ class YouService:
         observation: Mapping[str, Any],
         *,
         protected_texts: list[str],
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, str]:
+        """校验一条观察，返回 (归一化结果, 失败原因)；通过时原因是空串。
+
+        为什么要返回原因：这里有九道各自独立的闸，原先全都只返回 `None`，
+        调用方只能把九种可能拼成一句话丢回去。收到的人看见「aspect / basis
+        必须是允许值」却不知道允许值是什么，也不知道自己到底撞了哪一条——
+        而其中两条（核心 aspect 要 explicit、stable_fact 还要 long_term）
+        连提都没提，于是枚举填对了照样被拒，且报错一字不变。
+
+        枚举值直接从 VALID_* 生成，不要在文案里手抄一份——手抄的那份会和
+        代码分家。
+        """
         aspect = str(observation.get("aspect") or "").strip().lower()
         concept_key = str(observation.get("concept_key") or "").strip().lower()
         concept_value = str(observation.get("concept_value") or "").strip().lower()
         content = str(observation.get("content") or "").strip()
         basis = str(observation.get("basis") or "").strip().lower()
-        if (
-            aspect not in VALID_ASPECTS
-            or basis not in VALID_BASES
-            or not _CONCEPT_KEY_RE.fullmatch(concept_key)
-            or not _CONCEPT_VALUE_RE.fullmatch(concept_value)
-            or not content
-            or len(content) > 500
-        ):
-            return None
+
+        if aspect not in VALID_ASPECTS:
+            got = f"「{aspect}」" if aspect else "（空）"
+            return None, f"aspect {got} 不是允许值。可选：{_aspect_choices()}。"
+        if basis not in VALID_BASES:
+            got = f"「{basis}」" if basis else "（空）"
+            return None, f"basis {got} 不是允许值。可选：{_basis_choices()}。"
+        if not _CONCEPT_KEY_RE.fullmatch(concept_key):
+            return None, (
+                f"concept_key「{concept_key}」不合法：要 snake_case，"
+                "小写字母开头，之后只能是小写字母 / 数字 / 下划线，3~120 字符。"
+            )
+        if not _CONCEPT_VALUE_RE.fullmatch(concept_value):
+            return None, (
+                f"concept_value「{concept_value}」不合法：小写字母或数字开头，"
+                "之后只能是小写字母 / 数字 / 下划线 / 连字符，1~80 字符。"
+            )
+        if not content:
+            return None, "content 不能为空。"
+        if len(content) > 500:
+            return None, f"content 有 {len(content)} 字，上限 500 字。"
         if contains_forbidden_subject(content, concept_key, concept_value):
-            return None
+            return None, "这条落在禁止主题里，写不进去。"
         if leaks_protected_text(content, protected_texts):
-            return None
+            return None, "这条照抄了依据桶的原文；请写成你自己的判断，不要复述原文。"
+
         explicit = bool(observation.get("explicit"))
         long_term = bool(observation.get("long_term"))
         if aspect in _CORE_ASPECTS and not explicit:
-            return None
+            return None, (
+                f"aspect「{aspect}」属于核心项（{_core_aspect_choices()}），"
+                "只能记人类明确说过的话，必须同时传 explicit=True。"
+            )
         if aspect == "stable_fact" and (not explicit or not long_term):
-            return None
+            return None, (
+                "aspect「stable_fact」要同时传 explicit=True 与 long_term=True："
+                "长期事实必须是人类明确说过、且明确说了长期有效的。"
+            )
         return {
             "aspect": aspect,
             "concept_key": concept_key,
@@ -252,7 +294,7 @@ class YouService:
             "basis": basis,
             "explicit": explicit,
             "long_term": long_term,
-        }
+        }, ""
 
     async def write(
         self,
@@ -280,7 +322,7 @@ class YouService:
 
         edges, protected_texts = await self._build_edges(bucket_ids, basis=basis)
 
-        normalized = self._validate_observation(
+        normalized, reason = self._validate_observation(
             {
                 "aspect": aspect,
                 "concept_key": concept_key,
@@ -293,11 +335,7 @@ class YouService:
             protected_texts=protected_texts,
         )
         if normalized is None:
-            raise ValueError(
-                "这条写不进去：aspect / basis 必须是允许值，concept_key 用 "
-                "snake_case、concept_value 用规范化短值，正文不超过 500 字，"
-                "且不能落在禁止主题里，也不能照抄记忆原文。"
-            )
+            raise ValueError(f"这条写不进去：{reason}")
 
         # 写入与重建必须原子：中间放另一路进来，它读到的 claims 快照会漏掉
         # 这一条，而后完成的那一方会把自己的旧快照当成最新投影发布出去。

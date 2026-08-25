@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "de58d841bd709aa85a66ecc500dfbb48e7c207e84c399e30e751e8ccad6e8c9b",
+      "sha256": "bb8408e7188bc6e00f87159c1898e6bfee03926fb2c65b5af3f372a7abfbc7fb",
       "size": 6
     },
     {
@@ -792,8 +792,8 @@
     },
     {
       "path": "src/ombrebrain/you/models.py",
-      "sha256": "c7f90adc6bfce15cf8c0018b5fdae8487fc3170b8b1d157e26a0688f1c2ee46a",
-      "size": 19324
+      "sha256": "97a064a06d35c47d99a21106fdbf7b70e7730f2d94530eaa03bae91dbe6b96bf",
+      "size": 20093
     },
     {
       "path": "src/ombrebrain/you/safety.py",
@@ -802,8 +802,8 @@
     },
     {
       "path": "src/ombrebrain/you/service.py",
-      "sha256": "4b4c67fd807f320785674852d18cc80e91a149d55b7f59f6ae7e5ab1201012ec",
-      "size": 29369
+      "sha256": "fae5dec4734596e718fd78b73345a3b49b841bd1d40a3e69ef54b1a2019384fb",
+      "size": 31470
     },
     {
       "path": "src/ombrebrain/you/store.py",
@@ -812,8 +812,8 @@
     },
     {
       "path": "src/ombrebrain/you/tool_gate.py",
-      "sha256": "fe9f456d69c0b30042e93322703ad212220f46f923ab1670cf03f263402a1151",
-      "size": 3061
+      "sha256": "2d1e179671352bedbab84fd17bcf601d1b4d0f5391ab0f2dfb46255625d377c1",
+      "size": 4153
     },
     {
       "path": "src/reclassify_api.py",
@@ -1167,5 +1167,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.6.1"
+  "version": "3.6.2"
 }

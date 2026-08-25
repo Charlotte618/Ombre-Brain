@@ -30,6 +30,11 @@ VALID_BASES = frozenset(
 _ID_RE = re.compile(r"^[a-z]+_[0-9a-f]{32}$")
 
 
+def _choices(values: frozenset[str]) -> str:
+    """把枚举直接渲染进报错。手抄一份文案迟早会和代码分家。"""
+    return " / ".join(sorted(values))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -159,10 +164,15 @@ class EvidenceEdge:
         object.__setattr__(self, "bucket_id", _require_text(self.bucket_id, "bucket_id", limit=200))
         stance = str(self.stance or "").strip().lower()
         basis = str(self.basis or "").strip().lower()
+        # 这里是 basis 最早的一道闸——`_build_edges` 先于 service 的观察校验
+        # 跑到，所以非法 basis 永远在这里就炸。报错必须自己带上允许值，
+        # 否则调用方拿到的是一句无从下手的英文，而后面那道带枚举的提示
+        # 根本走不到。
         if stance not in VALID_STANCES:
-            raise ValueError("invalid evidence stance")
+            raise ValueError(f"stance「{stance}」不是允许值。可选：{_choices(VALID_STANCES)}。")
         if basis not in VALID_BASES:
-            raise ValueError("invalid evidence basis")
+            got = f"「{basis}」" if basis else "（空）"
+            raise ValueError(f"basis {got} 不是允许值。可选：{_choices(VALID_BASES)}。")
         object.__setattr__(self, "stance", stance)
         object.__setattr__(self, "basis", basis)
         object.__setattr__(
@@ -304,7 +314,8 @@ class YouClaim:
         review_state = str(self.review_state or "").strip().lower()
         recall_policy = str(self.recall_policy or "").strip().lower()
         if aspect not in VALID_ASPECTS:
-            raise ValueError("invalid claim aspect")
+            got = f"「{aspect}」" if aspect else "（空）"
+            raise ValueError(f"aspect {got} 不是允许值。可选：{_choices(VALID_ASPECTS)}。")
         if lifecycle not in VALID_LIFECYCLES:
             raise ValueError("invalid claim lifecycle")
         if review_state not in VALID_REVIEW_STATES:

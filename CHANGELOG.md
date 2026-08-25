@@ -2,6 +2,39 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.6.2
+
+### 修复 / Fixed
+
+- **`You` 的拒绝提示现在说得清是哪一条、允许值是什么。**
+  - 之前 `_validate_observation` 有九道各自独立的闸，但**全部只返回 `None`**，
+    调用方只好把九种可能拼成一句「aspect / basis 必须是允许值，concept_key 用
+    snake_case……」丢回去。收到的人既不知道允许值是什么，也不知道自己撞了哪一条。
+  - 更糟的是其中两条根本没被提到：`preferred_address` / `explicit_boundary`
+    需要 `explicit=True`，`stable_fact` 还要再加 `long_term=True`。枚举填对了
+    照样被拒，而报错一字不变。
+  - 非法 `basis` 甚至走不到那句话——`_build_edges` 先跑到，`EvidenceEdge`
+    直接抛裸英文 `invalid evidence basis`。模型层这道闸同样补上了枚举。
+  - 枚举文案由 `VALID_*` 直接生成，不手抄——手抄的那份会和代码分家。
+  - **这个教训 `them` 已经学过一次**（见 `them/service.py` 里那段注释：
+    「真机试用时我自己被这句通用提示误导过一次……一条说不清哪里错的提示，
+    等于让调用方拿盲试当调试」），只是没有回移到 `you`。这次补齐。
+
+- **`You` 的工具描述此前完全没提 `aspect` 和 `basis`。**
+  - 两个字在整段描述里一次都没出现，而它们都是必须填对的枚举——调用方只能
+    靠猜，猜错再撞上那句说不清的报错。
+  - 照 `Them` 的体例把五个 aspect、四个 basis 连同各自的含义列出来，并写明
+    核心项与 `stable_fact` 的额外要求。
+
+### 说明 / Note
+
+- **`Them` 不是「没部署到 MCP」，是默认关着。** 它和 `You` 一样是运行时动态
+  挂载的可选工具（`ThemToolGate`），`them_tool_gate` 在 `server.py` 里已经
+  正确注入进 `web/_shared`。在 Dashboard 的「他们 Them」一节打开开关即可——
+  `/api/settings/them` 会立刻 `sync(True)` 把工具挂上，不需要重启。
+  关着时工具**完全不出现在清单里**，这是有意的：留一个返回「已关闭」的壳，
+  等于把模块开没开变成模型能看见的信息。
+
 ## 3.6.1
 
 ### 修复 / Fixed
