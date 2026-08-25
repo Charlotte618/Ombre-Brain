@@ -188,6 +188,13 @@ surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
   breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is a safety ceiling, not the default
   feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  # 3.6.0: 浮现区给近 7 天创建的桶预留几个位置，按 created 倒序；其余位置照旧按权重。
+  # 权重是累积的——旧桶靠历史访问把分数攒得很高，新桶从 0 起步，永远排不进前列。
+  # 往打分公式里掺新近性等于把「新」和「重要」换算成同一种东西，那个换算率没有
+  # 正确答案；留位置不用回答这个问题，它只说「无论权重怎么排，总要有几条是最近的」。
+  # 按缺口补（权重自己送进来几条就少补几条），且不超过 max_results 的一半。
+  # 设 0 关闭，回到 3.5.0 的纯权重排序。
+  recent_slots: 3
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
   # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。

@@ -140,6 +140,9 @@ EXPECTED_TOOL_PROPERTIES = {
         # 3.4.0：订正/删除写入那一刻留下的引语。只有 replace，没有 append——
         # 补录不归 trace，同上一条是一个道理。
         "quotes_replace",
+        # 3.6.0：检索不再自动 touch 命中桶，这里是唯一的强化入口。
+        # 「这条要紧」是读完之后的判断，不该由读取动作自己代劳。
+        "reinforce",
     },
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},

@@ -220,10 +220,11 @@ hold / grow（Claude 决策）
                         └─ 后台单 worker 生成向量；失败指数退避、重启后续跑
               │
               ▼
-       存活期：每次 breath(query) 命中 → bucket_mgr.touch()
+       存活期：trace(id, reinforce=True) → bucket_mgr.touch()
                                            ├─ last_active = now
                                            ├─ activation_count += 1
                                            └─ _time_ripple()  ±48h 邻近桶 +0.3
+              （3.6.0 起检索命中**不再** touch；强化是读完之后的显式动作）
               │
               ▼
        decay_engine 后台循环（每 24h）→ run_decay_cycle()
@@ -233,7 +234,9 @@ hold / grow（Claude 决策）
         └─ 否 → 继续存活
 ```
 
-(数据流约束：`touch()` 只在**检索命中**时调用，**浮现模式不调用**——这是为了不让 `breath()` 自动浮现重置衰减计时器，否则高活跃桶会永远霸占浮现位。)
+(数据流约束（3.6.0 改）：`touch()` 只由 `trace(bucket_id, reinforce=True)` 触发，**所有读取路径都不调用**——浮现、`breath_search`、按完整 ID 取桶一律只读。
+
+原本 `touch()` 在检索命中时调用，于是「被频繁查询」逐渐等价于「更重要」：为核对事实、debug、重复检索而读取记忆也会刷新 `last_active`、累加 `activation_count` 并触发时间涟漪。实测旧桶权重积到 51，新桶再也排不进浮现区。**检索是「我去找它」，强化是「找到之后，这条确实要紧」**——后者只有读完才判断得出来，绑在一起等于让读取行为自己给自己投票。)
 
 ### 2.2 对话启动序列（CLAUDE_PROMPT.md 规定的 Claude 端行为）
 
@@ -298,8 +301,8 @@ feel 桶自身：
 2. **Plan 通道**（`domain="plan"`，仅 `breath_advanced`，3.0.0 新增）：直接拉所有 `type==plan && status==active` 桶，按 `created` 倒序逐字返回，放不下的整条省略、不截断不摘要；一条 active plan 都没有时返回「没有计划。」。
    > **为什么必须有这个通道**：plan 桶被浮现模式排除，而 `domain` 参数只在 catalog 模式和检索模式（模式 5，需要 `query`）里生效。没有这一分流时，`breath_advanced(domain="plan")` 会落到模式 4 浮现模式，返回权重最高的桶 + 置顶核心准则——**调用方拿到的是核心准则，不是 plan**。叠加 dream 末尾 plan 段可能因总预算降级成只报条数，plan 正文一度没有任何读取入口。回归测试见 `tests/test_breath_plan_channel.py`。
 3. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
-4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
-5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
+4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；**再按 `surfacing.recent_slots`（默认 3）给近 7 天创建的桶补足预留位置**（3.6.0，见下）；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」；3.6.0 起 **24 小时内新建的桶不进这个池**——`activation_count==0` 既可能是「很久没被想起」也可能是「还没来得及被想起」，判据本身分不出来，得靠年龄。3.6.0 起本模式也接 `date_from`/`date_to`（核心准则不受时间过滤影响：它们是准则，不是那段时间里发生的事）。
+5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → **命中不 `touch()`**（3.6.0：检索与强化解耦，见 §2.1 数据流约束）。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
 #### 检索的门：召回与排序目前没有分开（已知设计债）
 
@@ -440,6 +443,10 @@ if text_match or semantic_match: 入选
   - **只能改和删，不能补录**：桶里本来没有引语时拒绝，条数只能持平或减少。引语与已删除的原文层的全部区别就在「谁决定记住」——原文层系统自动存全量、事后随时可查，引语是写入那一刻挑的（见 `ombrebrain/storage/quote_store.py` 模块 docstring）。能补录的话，任何一句话都可以被事后追认为「当时就知道重要」，这个通道当场退化成存原文。与 `relink 不能凭空建立关系` 同源。
   - 条数/长度硬上限（3 条 / 每条 100 字，**超限拒绝不截断**）由 `BucketManager._sanitize_quotes` → `normalize_quotes` 统一把关，`_quote_edit` 不重复校验。
   - 成功后回显的是**读回磁盘的结果**而不是入参：入参可能是裸字符串列表，落盘的是归一化并清洗过的结构；回显入参会让「改成了什么」看不出来。
+- `reinforce=True` 是 3.6.0 起**唯一**的强化入口（实现见 `tools/trace/_reinforce.py`）。调 `bucket_mgr.touch(bucket_id, ripple=True)`：刷新 `last_active`、`activation_count += 1`、触发时间涟漪。与其他字段更新、`unlink`/`relink`、`quotes_replace` 全部互斥，走独立早返回分支。
+  - **为什么要有它**：3.6.0 把 `breath_search` 改成完全只读（见 §2.1）。少了这个入口，解耦就不是解耦，是把强化删了。
+  - **为什么是按桶而不是按批**：检索命中里绝大多数只是路过。「这条要紧」是读完之后对**某一条**的判断，不是对候选集的判断。
+  - `ripple=True`（而不是当年批量 touch 用的 `False`）：显式强化是一次真实的想起，让时间相邻的记忆轻微唤醒正是时间涟漪的设计意图；当年关掉涟漪是批量场景的性能妥协，一次一条不再需要。
 
 (返回时会按 `resolved`/`digested` 状态变化追加人话提示。`digested=True` 会从无参 breath、被动联想和 dream 候选中硬过滤，不依赖 importance/衰减分数；显式 query 真命中以及 importance/catalog 审计入口仍可找回。)
 
@@ -794,12 +801,12 @@ Dashboard `/api/search` 现在会在 `bucket_mgr.search()` 排序之后、JSON �
 
 ### 4.3.3C MCP Breath Search Surface Policy（vNext Phase 3C）
 
-MCP `breath(query=...)` 现在也会在显式查询命中进入 dehydration / touch 之前调用 `SurfacePolicyVM.evaluate_bucket(..., mode="search")`。这一步覆盖关键词搜索结果和语义向量补充结果，但不改变底层 `BucketManager.search()`。
+MCP `breath(query=...)` 现在也会在显式查询命中进入渲染之前调用 `SurfacePolicyVM.evaluate_bucket(..., mode="search")`。这一步覆盖关键词搜索结果和语义向量补充结果，但不改变底层 `BucketManager.search()`。
 
 边界：
 
 - `dont_surface=True` 在 `breath(query=...)` 里仍可达；主动遗忘只限制无参/被动浮现。
-- `archived`、`deleted_at`、`tombstone` 终态不会从 MCP 查询搜索返回，也不会被这条路径 `touch()`。
+- `archived`、`deleted_at`、`tombstone` 终态不会从 MCP 查询搜索返回。（3.6.0 起这条路径对**任何**桶都不再 `touch()`，终态桶的豁免因此不再是一条独立边界。）
 - `feel`、`plan`、`letter` 仍沿用 MCP 搜索入口原有排除规则，保持专用通道边界。
 - 查询结果不足时的随机 drift 仍是后续收敛项；本阶段只统一显式 query hit 的读取侧 policy。
 
@@ -1625,6 +1632,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `surfacing.feel_max_tokens` | `15000` | **dream** feel 历史段的 token 预算，超出折叠为 60 字摘要。3.0.0 起不再作用于 feel 通道——`feel(query=...)` 用自己的 `max_tokens`（默认 10000），且放不下时整条省略、不折叠 |
 | `timezone` | `Asia/Shanghai` | 3.0.0：用户只给日期、不写时区时按它理解（Letter 定时锁 `unlock_date` 等）。IANA 时区名；名字非法或缺 tzdata 时回退固定 `+08:00`，但 Dashboard 保存会当场校验拒绝。Dashboard「设置」可改，热更新生效 |
 | `ai_name` | （空） | 3.0.0：AI 一方的显示名。优先级高于环境变量 `AI_NAME`；随 vault 持久化，容器重建不丢。留空=未配置，回退环境变量再回退 `"AI"` |
+| `surfacing.recent_slots` | `3` | 3.6.0：浮现区预留给近 7 天创建桶的位置数，按 `created` 倒序，其余位置照旧按权重。配额按**缺口**补（权重排序自己送进来几条新桶就少补几条），且不超过 `max_results` 的一半。设 `0` 关闭，回到 3.5.0 的纯权重排序 |
 | `surfacing.sampling.enabled` | `false` | 浮现模式加权采样总开关；false 走原 Top-1 + shuffle |
 | `surfacing.sampling.top_k` | `5` | 候选池大小（按衰减分取前 k） |
 | `surfacing.sampling.sample_k` | `2` | 从池里无放回抽 k 条返回 |

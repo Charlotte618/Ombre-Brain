@@ -21,8 +21,11 @@ tools/breath/feel.py — feel 检索通道
 ========================================
 """
 
+from datetime import datetime  # noqa: F401 —— 供签名注解使用
+
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
+from ._date_range import bucket_in_created_range
 from ._verbatim import render_stored_bucket
 
 # 与 breath_search 的向量通道保持同一门槛，避免两条检索面给出不同的"相关"标准。
@@ -76,7 +79,12 @@ def _literal_hits(query: str, feels: list[dict]) -> set[str]:
     return hits
 
 
-async def surface_feels(query: str = "", max_tokens: int = 0) -> str:
+async def surface_feels(
+    query: str = "",
+    max_tokens: int = 0,
+    created_from: "datetime | None" = None,
+    created_to: "datetime | None" = None,
+) -> str:
     if not str(query or "").strip():
         return _NEEDS_QUERY
     query = str(query).strip()
@@ -87,9 +95,14 @@ async def surface_feels(query: str = "", max_tokens: int = 0) -> str:
             b for b in all_buckets
             if b.get("metadata", {}).get("type") == "feel"
             and not is_letter_bucket(b)
+            # 3.6.0：feel 也认时间区间。「上个月我是什么感受」是个真实的问题，
+            # 在此之前 date_from/date_to 走到这条分支就消失了。
+            and bucket_in_created_range(b, created_from, created_to)
         ]
         if not feels:
             # 空的时候其实挺好的。什么都还没发生。
+            if created_from is not None or created_to is not None:
+                return "这段时间里没有留下过 feel。"
             return "还没有留下过 feel。"
 
         feel_ids = {str(b.get("id") or "") for b in feels}

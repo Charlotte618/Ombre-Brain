@@ -21,9 +21,12 @@ tools/breath/importance.py — importance_min 模式
 ========================================
 """
 
+from datetime import datetime  # noqa: F401 —— 供签名注解使用
+
 from .. import _runtime as rt
 from .._common import is_importance_audit_candidate
 from ..plan.core import is_letter_bucket
+from ._date_range import bucket_in_created_range
 from ._verbatim import render_stored_bucket
 from errors import safe_error_detail
 
@@ -112,7 +115,13 @@ def _select_importance_buckets(buckets: list[dict], importance_min: int, limit: 
     return sorted(selected, key=_importance_sort_key, reverse=True)
 
 
-async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_by_importance(
+    importance_min: int,
+    max_tokens: int,
+    tag_filter: list,
+    created_from: "datetime | None" = None,
+    created_to: "datetime | None" = None,
+) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
@@ -125,9 +134,14 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
         )
         and not is_letter_bucket(b)
         and _bucket_has_tags(b.get("metadata", {}), tag_filter)
+        # 3.6.0：重要度审计也认时间区间。日期过滤必须在 20 条截断**之前**——
+        # 先截后滤会让「七月的高重要度记忆」变成「全库前 20 里恰好在七月的那几条」。
+        and bucket_in_created_range(b, created_from, created_to)
     ]
     filtered = _select_importance_buckets(filtered, importance_min, limit=20)
     if not filtered:
+        if created_from is not None or created_to is not None:
+            return f"这段时间里没有重要度 >= {importance_min} 的记忆。"
         return f"没有重要度 >= {importance_min} 的记忆。"
 
     try:

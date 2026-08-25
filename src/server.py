@@ -898,6 +898,7 @@ async def trace(
     relink: Optional[str] = "",
     relation_type: Optional[str] = "",
     quotes_replace: Optional[list] = None,
+    reinforce: Optional[bool] = False,
 ) -> str:
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
@@ -936,6 +937,13 @@ async def trace(
     "at":"什么时候"}]。**只能改和删，不能补录**——这条记忆本来没有引语会被拒绝，
     条数也只能持平或减少。「当时说出口就知道不想忘」是写入那一刻的判断；事后
     追认一句话「当时就知道它重要」，那不是引语，是摘要。同样与其他字段更新互斥。
+
+    强化：reinforce=True 刷新这条记忆的活跃时间并累加 activation_count，让它在
+    之后的浮现里排得更靠前。**检索本身不再做这件事**——breath_search 命中一条
+    不代表它要紧，只代表我在找它；为了核对、debug、反复确认而读的记忆，读多了
+    权重就会爬到最高，那不是记忆变重要，是我查得勤。所以强化改成读完之后针对
+    **那一条**显式确认：这条确实要紧。整批候选不要一起强化，命中里绝大多数只是
+    路过。与其他字段更新互斥，请单独调用。
     """
     if deletion_request_id or deletion_decision:
         result = await deletion_requests.decide(
@@ -962,6 +970,7 @@ async def trace(
             old_str=old_str, new_str=new_str,
             unlink=unlink, relink=relink, relation_type=relation_type,
             quotes_replace=quotes_replace,
+            reinforce=reinforce,
         ),
         op="trace",
         args={
@@ -985,6 +994,7 @@ async def trace(
             "quotes_replace_count": (
                 len(quotes_replace) if quotes_replace is not None else -1
             ),
+            "reinforce": bool(reinforce),
         },
     )
 

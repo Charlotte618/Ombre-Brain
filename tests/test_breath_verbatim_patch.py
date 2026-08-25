@@ -80,7 +80,9 @@ async def test_dispatch_keeps_default_breath_budget_and_allows_explicit_headroom
     _install_runtime(OrderedBucketManager([]))
     seen = []
 
-    async def capture_default(*, max_results, max_tokens, tag_filter):
+    async def capture_default(
+        *, max_results, max_tokens, tag_filter, created_from=None, created_to=None
+    ):
         seen.append(max_tokens)
         return ""
 
@@ -286,7 +288,9 @@ async def test_token_budget_omits_whole_bucket_instead_of_truncating(monkeypatch
     assert "[bucket_id:second]" not in output
     assert second["content"][:20] not in output
     assert "token 预算不足" in output
-    assert manager.touched == ["first"]
+    # 3.6.0：检索完全只读。命中一条不代表它要紧，只代表我在找它——
+    # 强化改由 trace(bucket_id, reinforce=True) 针对具体桶显式确认。
+    assert manager.touched == []
     assert dehydrator.calls == 0
 
 

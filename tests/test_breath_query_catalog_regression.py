@@ -138,7 +138,9 @@ async def test_precise_query_applies_max_results_before_unrelated_core_can_take_
     assert unrelated_core["content"] not in output
     assert "[bucket_id:trailing-result]" not in output
     assert "token 预算不足" not in output
-    assert manager.touched == ["precise-target"]
+    # 3.6.0：按完整 ID 取桶同样只读。这条路径存在的理由就是「改之前先读一眼
+    # 原文」——越是要改它越会先读它，读一次涨一次权重是纯粹的自我实现。
+    assert manager.touched == []
 
 
 @pytest.mark.asyncio

@@ -184,7 +184,9 @@ async def test_search_breath_filters_terminal_states_but_keeps_dont_surface(deca
     assert "Tombstone query memory" in result
     assert "Archived query memory" in result
     assert "restore=True" in result
-    assert bucket_mgr.touched == ["visible", "hidden"]
+    # 3.6.0：检索只读。这条用例管的是「哪些终态桶还能被搜到」，
+    # 而「搜到」不再等于「被强化」——归档桶原本就不 touch，现在活跃桶也不。
+    assert bucket_mgr.touched == []
 
 
 @pytest.mark.asyncio

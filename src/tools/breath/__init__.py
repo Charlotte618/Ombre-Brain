@@ -36,6 +36,7 @@ from .._common import (
     check_metadata_size,
     check_query_size,
 )
+from ._date_range import parse_created_range
 from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
@@ -113,6 +114,11 @@ async def dispatch(
     if metadata_err:
         return metadata_err
 
+    # 3.6.0：日期区间在这里统一解析并校验一次，五条分支拿到同一对边界。
+    # 此前只有 search 分支接了 date_from/date_to，`breath_advanced(date_to=...)`
+    # 不带 query 时参数被静默丢弃——收下了、schema 也认，就是没人用它。
+    created_from, created_to = parse_created_range(date_from, date_to)
+
     if rt.mark_op:
         rt.mark_op("breath")
     rt.record_v3_tool_event("breath", {
@@ -152,6 +158,8 @@ async def dispatch(
             domain_filter=domain_filter or None,
             tag_filter=tag_filter,
             max_results=max_results,
+            created_from=created_from,
+            created_to=created_to,
         ))
 
     # --- 解析 tags 过滤；feel/__feel__ 映射到 feel 通道 ---
@@ -162,7 +170,12 @@ async def dispatch(
     # --- Feel 通道：3.0.0 起必须带关键词，不再全量返回（见 feel.py） ---
     if domain.strip().lower() == "feel":
         return await _with_deletion_requests(
-            await surface_feels(query=query, max_tokens=memory_max_tokens)
+            await surface_feels(
+                query=query,
+                max_tokens=memory_max_tokens,
+                created_from=created_from,
+                created_to=created_to,
+            )
         )
 
     # --- Plan 通道：与 feel 同构。plan 不参与普通浮现，没有这个分流时
@@ -176,6 +189,8 @@ async def dispatch(
             importance_min=importance_min,
             max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
+            created_from=created_from,
+            created_to=created_to,
         ))
 
     # --- 无 query：浮现模式 ---
@@ -184,6 +199,8 @@ async def dispatch(
             max_results=max_results,
             max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
+            created_from=created_from,
+            created_to=created_to,
         )))
 
     # --- 有 query：检索模式 ---
@@ -198,4 +215,6 @@ async def dispatch(
         date_from=date_from,
         date_to=date_to,
         with_quotes=quotes,
+        created_from=created_from,
+        created_to=created_to,
     ), query))

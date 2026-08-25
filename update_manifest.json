@@ -32,8 +32,8 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "552f154f722f0e1db8b25e81a3fee0ffa3e9b7a0527c4dc2d79759bd17feacb5",
-      "size": 5
+      "sha256": "138203e3f604a08fad0c4d0a297efe2c486219820dcdd053e72b7d843504c7a1",
+      "size": 6
     },
     {
       "path": "src/bm25_index.py",
@@ -827,8 +827,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "05fbd5103da0e038a2ef80045203c68b98f49b9c9692b5ac27359f94212c5b34",
-      "size": 74080
+      "sha256": "f22de0cdc728c24b81160a4e3839a27d0626955662bfbd68463efe0b74a1062a",
+      "size": 74803
     },
     {
       "path": "src/server_app.py",
@@ -867,8 +867,13 @@
     },
     {
       "path": "src/tools/breath/__init__.py",
-      "sha256": "9bbe82d4ed9cdf29a5ad86292bd807c3287ec1e2ac3a1cfbb038ac8e533ffcfd",
-      "size": 7524
+      "sha256": "9d60538f42aacf772f0b59c5c1dc4518212c82ec01dbb3491e5cccf5db6aa485",
+      "size": 8349
+    },
+    {
+      "path": "src/tools/breath/_date_range.py",
+      "sha256": "e3648864ad759a236985916bd3537ed8a2d1088638a3d839481033387c438905",
+      "size": 2928
     },
     {
       "path": "src/tools/breath/_verbatim.py",
@@ -877,28 +882,28 @@
     },
     {
       "path": "src/tools/breath/catalog.py",
-      "sha256": "7d8bbfd64b9dbbb9fd55570f6304af0a00a008f29b3dcc90a9c1a859280d130d",
-      "size": 5235
+      "sha256": "24ad3a171251ae11e5bdb88685870a1703e1eb763312d1281900895a2af74ea9",
+      "size": 5893
     },
     {
       "path": "src/tools/breath/feel.py",
-      "sha256": "208a89709e6f0ae3903d3ba95ba3d4c152efbf1192b6b6326ae2ede11b8472a7",
-      "size": 6485
+      "sha256": "f91cd68bfb2a7860dc09deff71a12bfe67c4000cfa85943d5ae912cfad6e0f26",
+      "size": 7090
     },
     {
       "path": "src/tools/breath/importance.py",
-      "sha256": "bb42c16649edb2884109083472c0faaffe9e99d5575afa5784baf7ba69dcb739",
-      "size": 6169
+      "sha256": "f7a6e6a4cf682571951526b12823a12bb103597e75c36effe1a320413910de5c",
+      "size": 6832
     },
     {
       "path": "src/tools/breath/search.py",
-      "sha256": "0948849fbea1d284a65a2504f9c2ab775cea50d14416c12dee03aab525510e54",
-      "size": 19814
+      "sha256": "193c514df06625da8d0de2cc34cc32f249208d45a4e8223f90f4de57adc629e6",
+      "size": 20475
     },
     {
       "path": "src/tools/breath/surface.py",
-      "sha256": "b0cde79cd74a2fbb7e20a2190359b600f2ac8e70507b5a3fafaa88fdca027942",
-      "size": 20647
+      "sha256": "4ab00dfa58db382e24933134135d3bdbc58bfcf8ee078059e1e06ff163851f55",
+      "size": 26507
     },
     {
       "path": "src/tools/dream/__init__.py",
@@ -1006,14 +1011,19 @@
       "size": 5215
     },
     {
+      "path": "src/tools/trace/_reinforce.py",
+      "sha256": "f06b9d7f50733b6b1dcb3293e1c2eecdb83de6749e838d457e0a8e3f981a04ec",
+      "size": 2355
+    },
+    {
       "path": "src/tools/trace/_relation_edit.py",
       "sha256": "4e41b88bb74b599854899a1f61d59a839d871de82e525d9d834f77a6bc1afeb6",
       "size": 7749
     },
     {
       "path": "src/tools/trace/core.py",
-      "sha256": "e006aca44a9dda2d7d038b2a11f48cc5b6f99b4d958a8c9d54ad0214123e4f88",
-      "size": 35979
+      "sha256": "37eb17d3a4b0cf8f2b4d343fb433f1e6a4ed4c1f9cd12a11fc6a18e6a6e149df",
+      "size": 37743
     },
     {
       "path": "src/tools/you/__init__.py",
@@ -1152,5 +1162,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.5.0"
+  "version": "3.6.0"
 }

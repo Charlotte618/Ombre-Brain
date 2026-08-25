@@ -20,6 +20,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
   分支（见 _relation_edit.py），不与字段更新混用
 - quotes_replace 订正/删除写入那一刻留下的引语，同样走独立早返回分支
   （见 _quote_edit.py）；只能改和删，不能补录
+- reinforce=True 是 3.6.0 起唯一的强化入口（见 _reinforce.py）：breath_search
+  不再自动 touch 命中桶，「这条要紧」改由模型读完之后针对具体桶显式确认
 
 不做什么（边界）：
 - 不创建桶（那是 hold/grow/plan/letter 的事）
@@ -33,7 +35,7 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
                      status, weight, dont_surface, why_remembered,
                      meaning_append, meaning_replace, media_append, media_replace,
                      hard_delete, delete_reason, restore, old_str, new_str,
-                     unlink, relink, relation_type, quotes_replace) → str
+                     unlink, relink, relation_type, quotes_replace, reinforce) → str
 ========================================
 """
 
@@ -53,7 +55,7 @@ from .._common import (
     check_protected_quota,
 )
 from ..plan.core import is_letter_bucket, letter_lock_revision, letter_lock_state
-from . import _quote_edit, _relation_edit
+from . import _quote_edit, _reinforce, _relation_edit
 
 
 async def trace_core(
@@ -88,6 +90,7 @@ async def trace_core(
     relink: Optional[str] = "",
     relation_type: Optional[str] = "",
     quotes_replace: Optional[list] = None,
+    reinforce: Optional[bool] = False,
 ) -> str:
     bucket_id = "" if bucket_id is None else str(bucket_id)
     if name is None:
@@ -218,6 +221,8 @@ async def trace_core(
     if unlink or relink or relation_type:
         if quotes_replace is not None:
             raise ToolInputError("quotes_replace 不能与关系修正同时使用，请分开调用；本次未修改。")
+        if parse_bool(reinforce, default=False):
+            raise ToolInputError("reinforce 不能与关系修正同时使用，请分开调用；本次未修改。")
         if not await rt.bucket_mgr.get(bucket_id):
             raise ToolInputError(f"找不到记忆 {bucket_id}；本次未修改。")
         return await _relation_edit.apply(
@@ -232,6 +237,8 @@ async def trace_core(
     if quotes_replace is not None:
         if not isinstance(quotes_replace, list):
             raise ToolInputError("quotes_replace 必须是列表（空列表表示删除全部引语）；本次未修改。")
+        if parse_bool(reinforce, default=False):
+            raise ToolInputError("reinforce 不能与 quotes_replace 同时使用，请分开调用；本次未修改。")
         if any((
             bool(name), bool(title), bool(domain), valence != -1, arousal != -1,
             importance != -1, bool(tags), resolved != -1, pinned != -1,
@@ -244,6 +251,25 @@ async def trace_core(
             raise ToolInputError("quotes_replace 必须单独调用，不能与其他字段更新或删除混在一次 "
                 "trace 里；本次未修改。")
         return await _quote_edit.apply(bucket_id.strip(), quotes_replace)
+
+    # 显式强化：3.6.0 把 breath_search 的自动 touch 拆掉之后，这里是唯一的
+    # 强化入口。同样独立早返回——「这条要紧」是一次事件，不是一个字段更新，
+    # 和改 importance 混在一起会让「读完之后的判断」变成一次顺手的副作用。
+    if parse_bool(reinforce, default=False):
+        if any((
+            bool(name), bool(title), bool(domain), valence != -1, arousal != -1,
+            importance != -1, bool(tags), resolved != -1, pinned != -1,
+            protected != -1, digested != -1, bool(content), delete, hard_delete,
+            restore, bool(status), weight != -1, dont_surface != -1,
+            bool(why_remembered), bool(meaning_append), meaning_replace is not None,
+            bool(media_append), media_replace is not None, bool(delete_reason),
+            bool(old_str), new_str_provided,
+        )):
+            raise ToolInputError(
+                "reinforce=True 必须单独调用，不能与其他字段更新或删除混在一次 "
+                "trace 里；本次未强化、未修改。"
+            )
+        return await _reinforce.apply(bucket_id.strip())
 
     if restore or delete or hard_delete:
         guarded_reader = (
