@@ -16,14 +16,15 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - Dashboard / HTTP 路由全部已拆分到 src/web/<域>.py（每个模块 register(mcp)），
   本文件仅在启动时调用 web.register_all(mcp) 装配；共享依赖见 web/_shared.py
 - 仍保留在本文件：进程启动、引擎初始化、GitHub 后台同步循环、Webhook 推送、
-  MCP Bearer 鉴权中间件、两个连接器装配、uvicorn 拉起
+  MCP Bearer 鉴权中间件、唯一连接器装配、uvicorn 拉起
 
 不做什么（边界）：
 - 不在这里写 hold/breath/dream 等业务逻辑（全在 tools/* 下）
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：`mcp` 13 个记忆工具 + 可选 You，`mcp_extra` 3 个信件工具；HTTP 路由在 src/web/*
+对外暴露：唯一连接器 `mcp`，16 个基础工具（含 3.4.0 并回的信件三件套）
+          + 可选的 You / Them（各按自己的持久开关动态挂载）；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -1267,8 +1268,12 @@ for _strict_tool_name in (
         )
 
 
-# You is the only dynamically exposed tool. It lives on the sole 16-tool
-# connector /mcp, alongside the three letter tools merged back in 3.4.0.
+# You 与 Them 是仅有的两个动态工具：各自按持久开关在唯一连接器 /mcp 上
+# 挂载或摘除。基础工具固定 16 个（含 3.4.0 并回的信件三件套），只开一个是
+# 17，两个都开是 18。
+#
+# 关掉时必须**完全消失**而不是留一个返回「已关闭」的壳——留着的话，
+# 模块开没开就变成了模型能看见的信息。
 you_tool_gate = YouToolGate(mcp, _t_you.dispatch)
 try:
     you_tool_gate.sync(you_service.status().enabled)
@@ -1406,7 +1411,7 @@ if __name__ == "__main__":
         )
         if transport == "streamable-http":
             logger.info(
-                "MCP /mcp：16 个工具（单连接器），You 按独立开关动态显隐"
+                "MCP /mcp：16 个基础工具（单连接器），You / Them 各按独立开关动态显隐"
             )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
@@ -1493,7 +1498,7 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio：主实例提供 13 个记忆工具，You 按独立开关显隐；启动成功边界由
+        # stdio：唯一实例提供 16 个基础工具，You / Them 各按独立开关显隐；启动成功边界由
         # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
         # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
         _stdio_runtime_lifecycle = RuntimeLifecycle(

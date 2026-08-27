@@ -107,7 +107,7 @@ Ombre-Brain/
 
 每个模块「干什么、边界在哪、依赖谁」：
 
-- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；16 个工具（含信件三件套）全部注册到唯一连接器 `/mcp`，`YouToolGate` 按持久开关在其上动态增减唯一可选工具。
+- **server.py**（约 1000 行）— MCP 服务入口。创建所有组件后调 `tools._runtime.init(...)` 注入依赖；16 个基础工具（含信件三件套）全部注册到唯一连接器 `/mcp`，`YouToolGate` 与 `ThemToolGate` 各按自己的持久开关在其上动态增减对应的可选工具（只开一个 17，两个都开 18）。
 - **tools/**（MCP 工具应用层）— 详见下面「1.x tools/ 包结构」。
 - **web/**（HTTP/Dashboard 路由层）— 详见下面「1.y web/ 包结构」。各域模块导出 `register(mcp)`；cookie/CSRF/会话鉴权等共享依赖在 `web/_shared.py`（类比 `tools/_runtime.py`）。
 - **bucket_manager.py** — 桶 CRUD + 多维加权搜索 + `touch()` 激活刷新 + `_time_ripple()` 时间涟漪 + 文件搬运（archive/permanent 之间）。
@@ -703,7 +703,7 @@ delete_id="", max_results=12)`，实现位于 `src/tools/them/core.py:15` 与 `o
 | `/api/env-vars` | GET | 🔒 | dashboard 设置页「⑤ 环境变量」只读区：当前进程读到的所有 `OMBRE_*`，敏感字段脱敏 |
 | `/api/env-config` | GET | 🔒 | 可写 6 字段的当前值（脱敏） |
 | `/api/env-config` | POST | 🔒 | 热更新 6 字段并写回 `.env`（重启仍有效） |
-| `/mcp/*` | — | 公开 | FastMCP 唯一连接器：16 个工具 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I**；You 独立开关开启时额外暴露 **You**（17 个） |
+| `/mcp/*` | — | 公开 | FastMCP 唯一连接器：16 个基础工具 —— breath / breath_search / breath_advanced / hold / grow / dream / feel / trace / anchor / release / pulse / plan / letter_write / letter_lock_update / letter_read / **I**；**You** 与 **Them** 各按自己的独立开关额外暴露（只开一个 17，两个都开 18） |
 | ~~`/mcp-extra`~~ | — | — | 已退役返回 404。2.8.5 退役 → 3.2.0 随信件恢复为第二个 FastMCP 实例 → 3.4.0 随信件并回主链路再次退役。端点集合见 `web/request_limits.py` 的 `_MCP_ENDPOINT_PATHS` |
 
 🔒 = 需要 cookie 认证，未认证返回 `JSON {error, setup_needed}` 状态码 401。
@@ -1828,7 +1828,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | Dashboard 401 | `web/_shared.py` + `web/auth.py` | 会话鉴权 helper；检查 cookie `ombre_session`；`OMBRE_DASHBOARD_PASSWORD` 是否正确 |
 | 改密码报「环境变量密码」错误 | `web/auth.py` | `auth_change_password` 检测 `OMBRE_DASHBOARD_PASSWORD` 设置时禁用 |
-| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；唯一连接器 `/mcp` 固定 16 个工具并动态显隐 `You`；URL 末尾必须是 `/mcp` |
+| HTTP 模式下 Claude.ai 连不上 | `server.py` | `__main__` CORS 中间件；唯一连接器 `/mcp` 固定 16 个基础工具并动态显隐 `You` / `Them`；URL 末尾必须是 `/mcp` |
 | docker compose 重启后桶丢失 | — | 使用 `OMBRE_HOST_VAULT_DIR` 将宿主机目录 bind mount 到 `/app/buckets`；该目录同时持久化桶、配置和 Tunnel token |
 | Dashboard 改 host vault 不生效 | `web/import_api.py` | 容器无法修改启动前确定的宿主机挂载；Docker 内界面只读，必须编辑宿主机 compose 同目录 `.env` 后 `--force-recreate` |
 | keepalive 失败 | `server.py` | `_keepalive_loop`；检查 `OMBRE_PORT` 实际监听端口 |
